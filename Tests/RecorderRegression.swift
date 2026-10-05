@@ -4,15 +4,17 @@ import Foundation
 struct RecorderRegression {
     static func main() async throws {
         let id = UUID().uuidString
-        func receipt(_ status: String) -> Data {
-            Data("{\"ok\":true,\"recording\":{\"id\":\"\(id)\"\(status)}}".utf8)
+        let sha = String(repeating: "a", count: 64)
+        func receipt(archived: Bool = true, verified: Bool = true, hash: String? = nil, processing: String = "complete") -> Data {
+            Data("{\"ok\":true,\"archived\":\(archived),\"archive\":{\"verified\":\(verified),\"recording_id\":\"\(id)\",\"sha256\":\"\(hash ?? sha)\"},\"processing\":{\"state\":\"\(processing)\"}}".utf8)
         }
-        precondition(UploadReceipt.recordingID(in: receipt("")) == id)
-        precondition(UploadReceipt.recordingID(in: receipt(",\"status\":\"complete\"")) == id)
-        precondition(UploadReceipt.recordingID(in: receipt(",\"status\":\"error\"")) == nil)
-        precondition(UploadReceipt.recordingID(in: receipt(",\"status\":\"processing\"")) == nil)
-        precondition(UploadReceipt.recordingID(in: Data("{\"ok\":true}".utf8)) == nil)
-        precondition(UploadReceipt.recordingID(in: Data("not json".utf8)) == nil)
+        precondition(UploadReceipt.verifiedArchive(in: receipt(), expectedSHA256: sha)?.recordingID == id)
+        precondition(UploadReceipt.verifiedArchive(in: receipt(processing: "insufficient_data"), expectedSHA256: sha)?.recordingID == id)
+        precondition(UploadReceipt.verifiedArchive(in: receipt(archived: false), expectedSHA256: sha) == nil)
+        precondition(UploadReceipt.verifiedArchive(in: receipt(verified: false), expectedSHA256: sha) == nil)
+        precondition(UploadReceipt.verifiedArchive(in: receipt(hash: String(repeating: "b", count: 64)), expectedSHA256: sha) == nil)
+        precondition(UploadReceipt.verifiedArchive(in: Data("{\"ok\":true}".utf8), expectedSHA256: sha) == nil)
+        precondition(UploadReceipt.verifiedArchive(in: Data("not json".utf8), expectedSHA256: sha) == nil)
         let samples: [UInt32] = [800, 810, 0, 2001, 795]
         let raw = RawH10RRRecording(deviceId: "TEST", exerciseId: "fixture", startedAt: Date(), stoppedAt: Date(), fetchedAt: Date(), polarSdkVersion: "test", firmwareVersion: "test", batteryPercentAtFetch: 80, recordingIntervalSeconds: 1, rrSamplesRaw: samples)
         let store = RecordingStore()
@@ -24,6 +26,6 @@ struct RecorderRegression {
         precondition(saved.rrSamplesRaw == samples, "Raw RR must remain unchanged, including outliers")
         let files = try await store.list()
         precondition(files.contains { $0.url == url }, "Saved files must remain discoverable")
-        print("PASS: complete receipts only, raw samples preserved, saved files discoverable")
+        print("PASS: verified archive receipts only, SHA must match, raw samples preserved, saved files discoverable")
     }
 }
