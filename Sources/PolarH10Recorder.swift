@@ -444,13 +444,15 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                         : "Retrying direct H10 RR read (\(attempt)/\(maxAttempts))…"
 
                     do {
-                        let exercise = try await api.fetchExercise(deviceId, entry: directEntry)
+                        let exercise = try await fetchExerciseWithTimeout(directEntry, seconds: 15)
                         try await persistFetchedExercise(exercise, entry: directEntry, stoppedAt: stoppedAt)
                         return
                     } catch {
-                        if isOperationNotPermitted106(error), attempt < maxAttempts {
+                        if (isOperationNotPermitted106(error) || isPftpTimeout(error)), attempt < maxAttempts {
                             let delay = retryDelays[min(attempt - 1, retryDelays.count - 1)]
-                            statusText = "H10 refused the direct RR read (Polar 106). Resetting connection in \(delay)s…"
+                            statusText = isPftpTimeout(error)
+                                ? "H10 RR read timed out. Resetting connection in \(delay)s…"
+                                : "H10 refused the direct RR read (Polar 106). Resetting connection in \(delay)s…"
                             try await Task.sleep(for: .seconds(delay))
                             try await resetConnectionForStoredFetch()
                             continue
@@ -542,12 +544,13 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                 }
                 return entries
             }
-            group.addTask {
+            group.addTask { [api, deviceId] in
                 try await Task.sleep(for: .seconds(seconds))
+                try? api.disconnectFromDevice(deviceId)
                 throw NSError(
                     domain: "AthleteOSRecorder",
                     code: 1004,
-                    userInfo: [NSLocalizedDescriptionKey: "H10 file listing timed out."]
+                    userInfo: [NSLocalizedDescriptionKey: "H10 file listing timed out; connection reset."]
                 )
             }
             defer { group.cancelAll() }
@@ -570,12 +573,13 @@ final class PolarH10Recorder: NSObject, ObservableObject {
             group.addTask { [api, deviceId] in
                 try await api.fetchExercise(deviceId, entry: entry)
             }
-            group.addTask {
+            group.addTask { [api, deviceId] in
                 try await Task.sleep(for: .seconds(seconds))
+                try? api.disconnectFromDevice(deviceId)
                 throw NSError(
                     domain: "AthleteOSRecorder",
                     code: 1006,
-                    userInfo: [NSLocalizedDescriptionKey: "H10 RR file read timed out."]
+                    userInfo: [NSLocalizedDescriptionKey: "H10 RR file read timed out; connection reset."]
                 )
             }
             defer { group.cancelAll() }
@@ -662,6 +666,11 @@ final class PolarH10Recorder: NSObject, ObservableObject {
             || text.contains("responseerror(errorcode: 106)")
             || text.contains("operation_not_permitted")
             || text.contains("operation not permitted")
+    }
+
+    private func isPftpTimeout(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        return nsError.domain == "AthleteOSRecorder" && [1004, 1005, 1006, 1007].contains(nsError.code)
     }
 
     private func friendlyError(_ error: Error) -> String {
