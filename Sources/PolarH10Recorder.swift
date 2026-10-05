@@ -23,6 +23,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
     }
     @Published private(set) var nearbyH10s: [NearbyH10] = []
     @Published private(set) var scanning = false
+    @Published private(set) var nightActionInProgress = false
     @Published private(set) var connectionState: ConnectionState = .disconnected
     @Published private(set) var bluetoothOn = false
     @Published private(set) var h10RecordingFeatureReady = false
@@ -43,7 +44,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
     @Published private(set) var statusText = "Tap Find nearby H10s, then choose your sensor."
     @Published private(set) var lastError: String?
 
-    private let store = RecordingStore()
+    private let store = RecordingStore.shared
     private var storedExerciseEntry: PolarExerciseEntry?
     private var scanTask: Task<Void, Never>?
     private var preparationTask: Task<Void, Never>?
@@ -119,6 +120,83 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         scanTask?.cancel()
     }
 
+    /// One operation owns connection, service preparation and the sensor transaction.
+    /// Archive/upload is independent: a network outage must not prevent another night.
+    func performNightAction() async {
+        guard !nightActionInProgress, !fetchInProgress, !pftpOperationInProgress else { return }
+        if deviceId.isEmpty { startScanning(); return }
+        nightActionInProgress = true
+        defer { nightActionInProgress = false }
+        clearError()
+        await reconcileArchivedNight()
+        guard await ensureReadyForNightAction() else { return }
+        // Restore a save completed just before a crash, before touching H10 storage.
+        if let id = currentExerciseId, let files = try? await store.list() {
+            for file in files {
+                if let identity = try? await store.sensorIdentity(for: file.url),
+                   identity.deviceId == deviceId, identity.exerciseId == id {
+                    lastSavedFile = file.url
+                    UserDefaults.standard.set(file.url.path, forKey: Keys.lastSavedFilePath)
+                    pendingFetchAvailable = false
+                    break
+                }
+            }
+        }
+        if recordingOngoing || pendingFetchAvailable {
+            await stopFetchAndSave()
+        } else {
+            await startRRRecordingAndReleasePhone()
+        }
+    }
+
+    func reconcileArchivedNight() async {
+        do {
+            let jobs = try await store.readySensorCleanups()
+            pendingSensorCleanupCount = jobs.count
+            if !recordingOngoing, jobs.contains(where: { $0.identity.deviceId == deviceId && $0.identity.exerciseId == currentExerciseId }) {
+                currentExerciseId = nil
+                pendingFetchAvailable = false
+                UserDefaults.standard.removeObject(forKey: Keys.exerciseId)
+                UserDefaults.standard.removeObject(forKey: Keys.startedAt)
+                UserDefaults.standard.removeObject(forKey: Keys.stoppedAt)
+            }
+            if let file = lastSavedFile, !FileManager.default.fileExists(atPath: file.path) {
+                lastSavedFile = nil
+                UserDefaults.standard.removeObject(forKey: Keys.lastSavedFilePath)
+            }
+        } catch {
+            fail("Verified archive cleanup will retry. Retained copies have not been discarded: \(error.localizedDescription)")
+        }
+    }
+
+    private func ensureReadyForNightAction() async -> Bool {
+        guard bluetoothOn else { fail("Turn on Bluetooth, then try again. Your recording is retained."); return false }
+        if connectionState == .disconnected { connect() }
+        for attempt in 0..<2 {
+            for tick in 0...300 {
+                if Task.isCancelled { return false }
+                let step = NightConnectionPolicy.next(
+                    bluetoothOn: bluetoothOn, connected: connectionState == .connected,
+                    recordingReady: h10RecordingFeatureReady, transferReady: fileTransferFeatureReady,
+                    transportBusy: pftpOperationInProgress, preparationTimedOut: preparationTimedOut,
+                    deadlineReached: tick == 300, attempt: attempt
+                )
+                if step == .ready { return true }
+                if step == .failed { break }
+                if step == .reconnect { break }
+                do { try await Task.sleep(for: .milliseconds(100)) } catch { return false }
+            }
+            if attempt == 0 && bluetoothOn { await retryPreparation() }
+        }
+        // Cancel a connection which never reached services, so the next tap can retry.
+        try? api.disconnectFromDevice(deviceId)
+        connectionState = .disconnected
+        h10RecordingFeatureReady = false
+        fileTransferFeatureReady = false
+        fail("H10 could not become ready. Wear the moistened strap and keep it nearby, then try again. Sensor data is retained.")
+        return false
+    }
+
     func startScanning() {
         clearError()
         guard bluetoothOn else {
@@ -179,6 +257,10 @@ final class PolarH10Recorder: NSObject, ObservableObject {
     }
 
     func connect(to h10: NearbyH10) {
+        guard !nightActionInProgress, !pendingFetchAvailable, !recordingOngoing else {
+            fail("Finish saving the current H10 night before changing sensors.")
+            return
+        }
         stopScanning()
         deviceId = h10.id
         connect()
@@ -286,7 +368,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         defer { pftpOperationInProgress = false }
 
         do {
-            let status = try await api.requestRecordingStatus(deviceId)
+            let status = try await requestStatusWithTimeout()
             recordingOngoing = status.ongoing
             if status.ongoing, !status.entryId.isEmpty {
                 currentExerciseId = status.entryId
@@ -316,10 +398,11 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         defer { pftpOperationInProgress = false }
 
         do {
-            let existing = try await api.requestRecordingStatus(deviceId)
+            let existing = try await requestStatusWithTimeout()
             guard !existing.ongoing else {
                 recordingOngoing = true
                 currentExerciseId = existing.entryId
+                UserDefaults.standard.set(existing.entryId, forKey: Keys.exerciseId)
                 pendingFetchAvailable = true
                 fail("The H10 already has an active recording. Stop/fetch it before starting another.")
                 return
@@ -328,14 +411,23 @@ final class PolarH10Recorder: NSObject, ObservableObject {
             let exerciseId = "AOS_\(Int(Date().timeIntervalSince1970))"
             let startedAt = Date()
 
-            try await api.startRecording(
-                deviceId,
-                exerciseId: exerciseId,
-                interval: .interval_1s,
-                sampleType: .rr
-            )
+            // Persist the intended identity before the remote write. If its response
+            // is lost, reopening presents End night, never an unsafe replacement start.
+            currentExerciseId = exerciseId
+            pendingFetchAvailable = true
+            UserDefaults.standard.set(exerciseId, forKey: Keys.exerciseId)
+            UserDefaults.standard.set(startedAt, forKey: Keys.startedAt)
+            UserDefaults.standard.removeObject(forKey: Keys.stoppedAt)
+            UserDefaults.standard.removeObject(forKey: Keys.lastSavedFilePath)
+            lastSavedFile = nil
+            let sensorAPI = api
+            let sensorId = deviceId
+            _ = try await boundedSensorOperation {
+                try await sensorAPI.startRecording(sensorId, exerciseId: exerciseId, interval: .interval_1s, sampleType: .rr)
+                return true
+            }
 
-            let confirmed = try await api.requestRecordingStatus(deviceId)
+            let confirmed = try await requestStatusWithTimeout()
             guard confirmed.ongoing else {
                 fail("Polar accepted the start request but status did not confirm an active recording.")
                 return
@@ -381,12 +473,23 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         }
 
         do {
-            let status = try await api.requestRecordingStatus(deviceId)
+            let status = try await requestStatusWithTimeout()
             var stoppedAt = UserDefaults.standard.object(forKey: Keys.stoppedAt) as? Date
 
             if status.ongoing {
+                guard !status.entryId.isEmpty else {
+                    throw NSError(domain: "AthleteOSRecorder", code: 1008, userInfo: [NSLocalizedDescriptionKey: "H10 did not identify its active recording. No data was deleted."])
+                }
+                currentExerciseId = status.entryId
+                pendingFetchAvailable = true
+                UserDefaults.standard.set(status.entryId, forKey: Keys.exerciseId)
                 statusText = "Stopping H10 recording…"
-                try await api.stopRecording(deviceId)
+                let sensorAPI = api
+                let sensorId = deviceId
+                _ = try await boundedSensorOperation {
+                    try await sensorAPI.stopRecording(sensorId)
+                    return true
+                }
                 recordingOngoing = false
                 stoppedAt = Date()
                 UserDefaults.standard.set(stoppedAt, forKey: Keys.stoppedAt)
@@ -521,7 +624,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                         : "Retrying direct H10 RR read (\(attempt)/\(maxAttempts))…"
 
                     do {
-                        let exercise = try await fetchExerciseWithTimeout(directEntry, seconds: 15)
+                        let exercise = try await fetchExerciseWithTimeout(directEntry, seconds: 120)
                         try await persistFetchedExercise(exercise, entry: directEntry, stoppedAt: stoppedAt)
                         return
                     } catch {
@@ -551,12 +654,14 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                 }
 
                 let fallbackExpectedId = currentExerciseId ?? UserDefaults.standard.string(forKey: Keys.exerciseId)
-                let entry = entries.first(where: { $0.entryId == fallbackExpectedId }) ?? entries.last!
+                guard let entry = entries.first(where: { $0.entryId == fallbackExpectedId }) else {
+                    throw NSError(domain: "AthleteOSRecorder", code: 1009, userInfo: [NSLocalizedDescriptionKey: "The expected night was not found. Other H10 files were left untouched."])
+                }
                 storedExerciseEntry = entry
                 storedExerciseId = entry.entryId
                 statusText = "Stored RR file found. Reading H10…"
 
-                let exercise = try await fetchExerciseWithTimeout(entry, seconds: 15)
+                let exercise = try await fetchExerciseWithTimeout(entry, seconds: 120)
                 try await persistFetchedExercise(exercise, entry: entry, stoppedAt: stoppedAt)
                 return
             } catch {
@@ -671,129 +776,74 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         }
     }
 
-    func markAthleteOSUploadConfirmed(for file: URL) {
-        guard let lastSavedFile, lastSavedFile.standardizedFileURL == file.standardizedFileURL else { return }
-        let exerciseId = storedExerciseId ?? currentExerciseId ?? UserDefaults.standard.string(forKey: Keys.exerciseId)
-        guard let exerciseId else { return }
-        athleteOSUploadConfirmed = true
-        UserDefaults.standard.set(exerciseId, forKey: Keys.uploadedExerciseId)
-        statusText = "Saved locally and confirmed in AthleteOS. H10 copy can now be deleted."
-    }
-
-    func markArchiveConfirmedAndLocalDeleted(for file: URL, exerciseId: String?) {
+    func markArchiveConfirmedAndLocalDeleted(for file: URL, identity: SensorRecordingIdentity?) {
         if let lastSavedFile, lastSavedFile.standardizedFileURL == file.standardizedFileURL {
             self.lastSavedFile = nil
             UserDefaults.standard.removeObject(forKey: Keys.lastSavedFilePath)
         }
-        if let exerciseId { queueSensorCleanup(exerciseId: exerciseId) }
+        if let identity, currentExerciseId == identity.exerciseId, deviceId == identity.deviceId {
+            currentExerciseId = nil
+            pendingFetchAvailable = false
+            UserDefaults.standard.removeObject(forKey: Keys.exerciseId)
+            UserDefaults.standard.removeObject(forKey: Keys.startedAt)
+            UserDefaults.standard.removeObject(forKey: Keys.stoppedAt)
+        }
         statusText = "Raw recording verified in AthleteOS. Local phone copy cleaned up."
     }
 
-    func queueSensorCleanup(exerciseId: String) {
-        let clean = exerciseId.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !clean.isEmpty else { return }
-        var ids = Set(UserDefaults.standard.stringArray(forKey: Keys.pendingSensorCleanupIds) ?? [])
-        ids.insert(clean)
-        UserDefaults.standard.set(Array(ids).sorted(), forKey: Keys.pendingSensorCleanupIds)
-        pendingSensorCleanupCount = ids.count
-    }
-
     func cleanupQueuedSensorCopies() async {
-        guard connectionState == .connected,
-              h10RecordingFeatureReady,
-              fileTransferFeatureReady,
-              !fetchInProgress,
-              !pftpOperationInProgress else { return }
-
-        var ids = Set(UserDefaults.standard.stringArray(forKey: Keys.pendingSensorCleanupIds) ?? [])
-        guard !ids.isEmpty else {
-            pendingSensorCleanupCount = 0
-            return
-        }
-
+        guard !nightActionInProgress, connectionState == .connected,
+              h10RecordingFeatureReady, fileTransferFeatureReady,
+              !recordingOngoing, !pendingFetchAvailable,
+              !fetchInProgress, !pftpOperationInProgress else { return }
         pftpOperationInProgress = true
         defer { pftpOperationInProgress = false }
         do {
+            // Finishes any verified local deletion interrupted by an app restart.
+            let jobs = try await store.readySensorCleanups()
+            pendingSensorCleanupCount = jobs.count
+            guard !jobs.isEmpty else { return }
+            let status = try await requestStatusWithTimeout()
+            guard !status.ongoing else { return }
             let entries = try await listExercisesWithTimeout(seconds: 12)
-            for entry in entries where ids.contains(entry.entryId) {
-                do {
-                    try await api.removeExercise(deviceId, entry: entry)
-                    ids.remove(entry.entryId)
-                    if currentExerciseId == entry.entryId {
-                        currentExerciseId = nil
-                        pendingFetchAvailable = false
-                        UserDefaults.standard.removeObject(forKey: Keys.exerciseId)
-                        UserDefaults.standard.removeObject(forKey: Keys.startedAt)
-                        UserDefaults.standard.removeObject(forKey: Keys.stoppedAt)
+            for job in jobs where job.identity.deviceId == deviceId {
+                if let entry = entries.first(where: { $0.entryId == job.identity.exerciseId }) {
+                    let sensorAPI = api
+                    let sensorId = deviceId
+                    _ = try await boundedSensorOperation {
+                        try await sensorAPI.removeExercise(sensorId, entry: entry)
+                        return true
                     }
-                } catch {
-                    // Keep this exercise queued. A cleanup failure must never affect
-                    // the already verified AthleteOS archive or block a new recording.
                 }
+                // A completed listing with no matching entry also confirms cleanup.
+                try await store.finishSensorCleanup(job)
             }
-            UserDefaults.standard.set(Array(ids).sorted(), forKey: Keys.pendingSensorCleanupIds)
-            pendingSensorCleanupCount = ids.count
-            if ids.isEmpty {
-                statusText = "Archived H10 copies cleaned up."
-            } else {
-                statusText = "\(ids.count) archived H10 recording(s) still waiting for sensor cleanup."
-            }
+            pendingSensorCleanupCount = try await store.readySensorCleanups().count
+            statusText = pendingSensorCleanupCount == 0 ? "Night archived. H10 cleanup complete." : "Night archived. H10 cleanup will retry later."
         } catch {
-            pendingSensorCleanupCount = ids.count
             statusText = "Archived recordings are safe in AthleteOS. H10 cleanup will retry later."
         }
     }
 
-    func deleteSensorCopy() async {
-        guard !fetchInProgress, !pftpOperationInProgress else {
-            statusText = "H10 is busy with another file/recording operation."
-            return
-        }
-        clearError()
-        guard lastSavedFile != nil else {
-            fail("A verified local save is required before deleting the H10 copy.")
-            return
-        }
-        guard athleteOSUploadConfirmed else {
-            fail("AthleteOS must confirm the upload before the H10 copy can be deleted.")
-            return
-        }
+    private func requestStatusWithTimeout() async throws -> PolarRecordingStatus {
+        let sensorAPI = api
+        let sensorId = deviceId
+        return try await boundedSensorOperation { try await sensorAPI.requestRecordingStatus(sensorId) }
+    }
 
-        pftpOperationInProgress = true
-        defer { pftpOperationInProgress = false }
-
-        do {
-            var entry = storedExerciseEntry
-            if entry == nil {
-                let expectedId =
-                    storedExerciseId ??
-                    currentExerciseId ??
-                    UserDefaults.standard.string(forKey: Keys.exerciseId)
-                var entries: [PolarExerciseEntry] = []
-                for try await candidate in api.listExercises(deviceId) {
-                    entries.append(candidate)
-                }
-                entry = entries.first(where: { $0.entryId == expectedId })
+    private func boundedSensorOperation<T: Sendable>(
+        _ operation: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await operation() }
+            group.addTask { [api, deviceId] in
+                try await Task.sleep(for: .seconds(25))
+                try? api.disconnectFromDevice(deviceId)
+                throw NSError(domain: "AthleteOSRecorder", code: 1010, userInfo: [NSLocalizedDescriptionKey: "H10 operation timed out. Sensor data is retained; try again."])
             }
-
-            guard let entry else {
-                fail("The saved H10 recording could not be found for deletion. Local and AthleteOS copies are retained.")
-                return
-            }
-
-            try await api.removeExercise(deviceId, entry: entry)
-            storedExerciseEntry = nil
-            storedExerciseId = nil
-            currentExerciseId = nil
-            pendingFetchAvailable = false
-            athleteOSUploadConfirmed = false
-            UserDefaults.standard.removeObject(forKey: Keys.exerciseId)
-            UserDefaults.standard.removeObject(forKey: Keys.startedAt)
-            UserDefaults.standard.removeObject(forKey: Keys.stoppedAt)
-            UserDefaults.standard.removeObject(forKey: Keys.uploadedExerciseId)
-            statusText = "Sensor copy deleted. Local raw file and AthleteOS copy retained."
-        } catch {
-            fail("Delete sensor copy failed: \(error.localizedDescription)")
+            defer { group.cancelAll() }
+            guard let result = try await group.next() else { throw CancellationError() }
+            return result
         }
     }
 

@@ -11,6 +11,17 @@ concurrency:
 permissions:
   contents: read
 jobs:
+  portable-regressions:
+    runs-on: ubuntu-latest
+    container: swift:6.2-noble
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+      - name: Portable lifecycle and connection regressions
+        run: |
+          swiftc Sources/NightConnectionPolicy.swift Sources/RecordingModels.swift Sources/RecordingStore.swift Sources/UploadReceipt.swift Tests/RecorderRegression.swift -o /tmp/recorder-regression
+          /tmp/recorder-regression
+          swiftc -frontend -parse Sources/*.swift Tests/RecorderRegression.swift
   validate:
     runs-on: macos-15
     timeout-minutes: 12
@@ -18,13 +29,18 @@ jobs:
       - uses: actions/checkout@v4
       - name: Regression tests
         run: |
-          swiftc Sources/RecordingModels.swift Sources/RecordingStore.swift Sources/UploadReceipt.swift Tests/RecorderRegression.swift -o /tmp/recorder-regression
+          swiftc Sources/NightConnectionPolicy.swift Sources/RecordingModels.swift Sources/RecordingStore.swift Sources/UploadReceipt.swift Sources/AthleteOSUploader.swift Tests/RecorderRegression.swift -o /tmp/recorder-regression
           /tmp/recorder-regression
       - name: Install XcodeGen
         run: brew install xcodegen
       - name: Generate Xcode project
         run: xcodegen generate
+      - name: Cache pinned Polar dependencies
+        uses: actions/cache@v4
+        with:
+          path: .swift-packages
+          key: polar-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('project.yml') }}
       - name: Resolve Polar BLE SDK
-        run: xcodebuild -resolvePackageDependencies -project AthleteOSRecorder.xcodeproj -scheme AthleteOSRecorder
+        run: xcodebuild -resolvePackageDependencies -clonedSourcePackagesDirPath .swift-packages -project AthleteOSRecorder.xcodeproj -scheme AthleteOSRecorder
       - name: Compile iPhone simulator
-        run: xcodebuild -project AthleteOSRecorder.xcodeproj -scheme AthleteOSRecorder -configuration Debug -sdk iphonesimulator -derivedDataPath build-simulator -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build
+        run: xcodebuild -clonedSourcePackagesDirPath .swift-packages -project AthleteOSRecorder.xcodeproj -scheme AthleteOSRecorder -configuration Debug -sdk iphonesimulator -derivedDataPath build-simulator -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build

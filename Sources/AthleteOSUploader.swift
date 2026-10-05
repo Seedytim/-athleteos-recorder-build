@@ -20,11 +20,15 @@ final class AthleteOSUploader: ObservableObject {
         UserDefaults.standard.set(Array(uploadedFileNames), forKey: "athleteos.uploadedFileNames")
     }
 
+    private let session: URLSession
+    private let tokenProvider: (() -> String?)?
     private let endpoint = URL(string: "https://bjdpzxbfpgmzwcdgzqso.supabase.co/functions/v1/ingest-hrv-logger")!
     private let keychainService = "nz.co.athleteos.recorder"
     private let keychainAccount = "overnight-ingest-token"
 
-    init() {
+    init(session: URLSession = .shared, tokenProvider: (() -> String?)? = nil) {
+        self.session = session
+        self.tokenProvider = tokenProvider
         if let path = UserDefaults.standard.string(forKey: "h10.lastSavedFilePath"),
            let exercise = UserDefaults.standard.string(forKey: "h10.exerciseId"),
            UserDefaults.standard.string(forKey: "h10.uploadedExerciseId") == exercise {
@@ -75,7 +79,7 @@ final class AthleteOSUploader: ObservableObject {
             request.setValue(token, forHTTPHeaderField: "X-AthleteOS-Ingest-Token")
             request.setValue("application/json", forHTTPHeaderField: "Accept")
 
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else {
                 throw UploadError.invalidResponse
             }
@@ -128,7 +132,7 @@ final class AthleteOSUploader: ObservableObject {
             request.setValue(fileURL.lastPathComponent, forHTTPHeaderField: "X-File-Name")
             request.setValue(token, forHTTPHeaderField: "X-AthleteOS-Ingest-Token")
 
-            let (responseData, response) = try await URLSession.shared.upload(for: request, fromFile: fileURL)
+            let (responseData, response) = try await session.upload(for: request, fromFile: fileURL)
             guard let http = response as? HTTPURLResponse else {
                 throw UploadError.invalidResponse
             }
@@ -148,6 +152,9 @@ final class AthleteOSUploader: ObservableObject {
                 )
             }
 
+            guard try Data(contentsOf: fileURL) == localData else {
+                throw UploadError.rejected(status: http.statusCode, detail: "The local raw file changed during upload. It was retained.")
+            }
             let json = (try? JSONSerialization.jsonObject(with: responseData)) as? [String: Any]
             let duplicate = json?["duplicate"] as? Bool ?? false
             lastUploadedRecordingId = receipt.recordingID
@@ -169,6 +176,11 @@ final class AthleteOSUploader: ObservableObject {
             lastError = statusText
             return nil
         }
+    }
+
+    func reportLocalCleanupError(_ error: Error) {
+        lastError = "Local cleanup needs retry: \(error.localizedDescription). Raw data is retained on the iPhone or in the verified AthleteOS archive."
+        statusText = lastError ?? "Local cleanup needs retry."
     }
 
     private func responseIsOk(_ data: Data) -> Bool {
@@ -224,6 +236,7 @@ final class AthleteOSUploader: ObservableObject {
     }
 
     private func readToken() -> String? {
+        if let tokenProvider { return tokenProvider() }
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: keychainService,

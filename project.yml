@@ -8,7 +8,7 @@ options:
 packages:
   PolarBleSdk:
     url: https://github.com/polarofficial/polar-ble-sdk.git
-    from: 8.4.0
+    exactVersion: 8.4.0
 
 targets:
   AthleteOSRecorder:
@@ -19,8 +19,8 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: nz.co.athleteos.recorder
-        MARKETING_VERSION: 2.0.1
-        CURRENT_PROJECT_VERSION: 13
+        MARKETING_VERSION: 2.0.2
+        CURRENT_PROJECT_VERSION: 14
         SWIFT_VERSION: 5.9
     info:
       path: Resources/Info.plist

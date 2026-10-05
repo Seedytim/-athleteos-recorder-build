@@ -12,8 +12,8 @@ struct ContentView: View {
     @EnvironmentObject private var uploader: AthleteOSUploader
     @State private var showSettings = false
     @State private var showRecordings = false
-    @State private var confirmDelete = false
     @State private var savedFiles: [SavedRecordingFile] = []
+    @State private var uploadPassInProgress = false
     @Environment(\.scenePhase) private var scenePhase
     @ScaledMetric(relativeTo: .title) private var heroDiameter = 132.0
 
@@ -26,7 +26,7 @@ struct ContentView: View {
     private var latestFile: URL? { recorder.lastSavedFile ?? savedFiles.first?.url }
     private var latestUploaded: Bool { latestFile.map { uploader.isUploaded($0) } ?? false }
 
-    private var sensorBusy: Bool { recorder.fetchInProgress || recorder.pftpOperationInProgress || recorder.recoveringConnection }
+    private var sensorBusy: Bool { recorder.nightActionInProgress || recorder.fetchInProgress || recorder.pftpOperationInProgress || recorder.recoveringConnection }
     private var busy: Bool { sensorBusy || uploader.busy }
     private var ready: Bool { recorder.h10RecordingFeatureReady && recorder.fileTransferFeatureReady }
     private var uploaded: Bool {
@@ -42,6 +42,7 @@ struct ContentView: View {
         if recorder.pendingFetchAvailable { return "Recording on your H10" }
         if recorder.connectionState == .connecting { return "Connecting your H10" }
         if recorder.connectionState == .connected && !ready { return recorder.preparationTimedOut ? "Let’s reconnect your H10" : "Preparing your H10" }
+        if uploader.lastUploadedRecordingId != nil && savedFiles.isEmpty { return "Night archived" }
         return ready ? "Ready to record" : "Let’s get connected"
     }
     private var subtitle: String {
@@ -52,16 +53,16 @@ struct ContentView: View {
         if recorder.lastSavedFile != nil { return uploaded ? "AthleteOS has verified the raw recording." : "Your raw file is safe on this phone and will archive when AthleteOS is connected." }
         if recorder.pendingFetchAvailable { return "Reconnect to check or finish the recording and save it to your phone." }
         if recorder.connectionState == .connected && !ready { return recorder.preparationMessage }
+        if uploader.lastUploadedRecordingId != nil && savedFiles.isEmpty { return uploader.statusText }
         return ready ? "Your Polar H10 is ready to record RR intervals." : "Wear your H10 with the strap moistened, then connect to begin."
     }
     private var actionTitle: String {
         if recorder.fetchInProgress { return "Ending night…" }
-        if uploader.busy { return "Saving night…" }
-        if sensorBusy { return "Working…" }
+        if sensorBusy { return recorder.pendingFetchAvailable ? "Ending night…" : "Starting night…" }
         if recorder.connectionState == .connecting { return recorder.pendingFetchAvailable ? "Connecting to end night…" : "Connecting…" }
-        if recorder.recordingOngoing || recorder.pendingFetchAvailable { return recorder.connectionState == .connected ? "End night" : "End night" }
+        if recorder.recordingOngoing || recorder.pendingFetchAvailable { return "End night" }
         if recorder.connectionState == .disconnected { return recorder.deviceId.isEmpty ? "Set up H10" : "Start night" }
-        if !ready { return recorder.preparationTimedOut ? "Reconnect H10" : "Preparing…" }
+        if !ready { return "Start night" }
         return "Start night"
     }
     private var actionIcon: String {
@@ -86,7 +87,7 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, minHeight: 60)
                     }
                     .buttonStyle(MidnightPrimaryButton())
-                    .disabled(busy || recorder.connectionState == .connecting || (!recorder.bluetoothOn && recorder.lastSavedFile == nil) || (recorder.connectionState == .connected && !ready && !recorder.preparationTimedOut && (recorder.lastSavedFile == nil || uploaded)))
+                    .disabled(sensorBusy || !recorder.bluetoothOn)
                     nearbySensors
                     if let error = recorder.lastError { notice(error, icon: "exclamationmark.triangle", color: .orange) }
                     if let error = uploader.lastError { notice(error, icon: "icloud.slash", color: .orange) }
@@ -112,8 +113,15 @@ struct ContentView: View {
             .sheet(isPresented: $showSettings) { settings }
             .sheet(isPresented: $showRecordings, onDismiss: { Task { await refreshSavedFiles() } }) { recordings }
             .task {
-                await processPendingUploads()
-                await refreshSavedFiles()
+                // Retry transient network/archive failures while this view is active.
+                while !Task.isCancelled {
+                    if scenePhase == .active {
+                        await processPendingUploads()
+                        await recorder.cleanupQueuedSensorCopies()
+                        await refreshSavedFiles()
+                    }
+                    do { try await Task.sleep(for: .seconds(30)) } catch { break }
+                }
             }
             .onChange(of: recorder.lastSavedFile) { _ in
                 Task {
@@ -141,7 +149,7 @@ struct ContentView: View {
     }
 
     private func refreshSavedFiles() async {
-        do { savedFiles = try await RecordingStore().list() }
+        do { savedFiles = try await RecordingStore.shared.list() }
         catch { /* The recordings sheet presents storage errors with retry context. */ }
     }
     private var header: some View {
@@ -251,70 +259,41 @@ struct ContentView: View {
             .fixedSize(horizontal: false, vertical: true).padding(16).frame(maxWidth: .infinity, alignment: .leading).midnightCard()
     }
     private func primaryAction() {
-        // Night mode is deliberately one-button after the initial H10 pairing.
-        // Start: connect/prepare if needed, start H10 RR recording, then release phone.
-        // End: reconnect/prepare if needed, stop, fetch, archive, verify, delete phone
-        // copy and queue H10 cleanup.
         Task {
-            if recorder.recordingOngoing || recorder.pendingFetchAvailable {
-                guard await ensureH10ReadyForNightAction() else { return }
-                await recorder.stopFetchAndSave()
-                await processPendingUploads()
-            } else {
-                guard await ensureH10ReadyForNightAction() else { return }
-                await recorder.startRRRecordingAndReleasePhone()
-            }
+            await recorder.performNightAction()
+            await processPendingUploads()
+            await recorder.cleanupQueuedSensorCopies()
+            await refreshSavedFiles()
         }
-    }
-
-    private func ensureH10ReadyForNightAction() async -> Bool {
-        if recorder.deviceId.isEmpty {
-            recorder.startScanning()
-            return false
-        }
-        if recorder.connectionState == .disconnected {
-            recorder.connect()
-        }
-        // One press owns the connection wait instead of making the athlete tap again.
-        for _ in 0..<200 {
-            if recorder.connectionState == .connected && ready { return true }
-            if recorder.preparationTimedOut { break }
-            try? await Task.sleep(for: .milliseconds(100))
-        }
-        if recorder.preparationTimedOut {
-            await recorder.retryPreparation()
-            for _ in 0..<200 {
-                if recorder.connectionState == .connected && ready { return true }
-                try? await Task.sleep(for: .milliseconds(100))
-            }
-        }
-        return recorder.connectionState == .connected && ready
     }
 
     private func upload(_ file: URL) async {
-        let store = RecordingStore()
-        let exerciseId: String?
-        do { exerciseId = try await store.exerciseId(for: file) }
-        catch { exerciseId = nil }
-        guard await uploader.upload(fileURL: file) != nil else { return }
+        let store = RecordingStore.shared
+        guard let receipt = await uploader.upload(fileURL: file) else { return }
         do {
-            try await store.delete(file)
-            recorder.markArchiveConfirmedAndLocalDeleted(for: file, exerciseId: exerciseId)
+            let identity = try await store.confirmArchive(file, receipt: receipt)
+            recorder.markArchiveConfirmedAndLocalDeleted(for: file, identity: identity)
             await recorder.cleanupQueuedSensorCopies()
             await refreshSavedFiles()
         } catch {
-            // The archive is verified. Keeping an undeleted local duplicate is safe;
-            // it will be retried and deduplicated by SHA-256 later.
+            uploader.reportLocalCleanupError(error)
         }
     }
 
     private func processPendingUploads() async {
-        guard uploader.isConnected, !uploader.busy else { return }
-        let store = RecordingStore()
-        guard let files = try? await store.list() else { return }
-        for file in files.reversed() {
-            if uploader.busy { break }
-            await upload(file.url)
+        guard !uploader.busy, !uploadPassInProgress else { return }
+        uploadPassInProgress = true
+        defer { uploadPassInProgress = false }
+        await recorder.reconcileArchivedNight()
+        guard uploader.isConnected else { return }
+        do {
+            let files = try await RecordingStore.shared.list()
+            for file in files.reversed() {
+                if Task.isCancelled || !uploader.isConnected { break }
+                await upload(file.url)
+            }
+        } catch {
+            uploader.reportLocalCleanupError(error)
         }
     }
     private var settings: some View {
@@ -353,7 +332,7 @@ struct ContentView: View {
                             Task { await recorder.stopFetchAndSave(); if let file = recorder.lastSavedFile, uploader.isConnected { await upload(file) } }
                         }.disabled(!ready || busy)
                     }
-                    if recorder.athleteOSUploadConfirmed {
+                    if recorder.pendingSensorCleanupCount > 0 {
                         Text("\(recorder.pendingSensorCleanupCount) archived H10 recording(s) waiting for automatic cleanup.").font(.footnote)
                     }
                     Text("H10 copies are removed automatically only after AthleteOS verifies the exact raw file. Cleanup retries when the H10 reconnects.").font(.footnote).foregroundStyle(.secondary)
@@ -365,9 +344,6 @@ struct ContentView: View {
                 }
             }
             .navigationTitle("Settings").navigationBarTitleDisplayMode(.inline)
-            .confirmationDialog("Delete the copy on your H10?", isPresented: $confirmDelete, titleVisibility: .visible) {
-                Button("Delete sensor copy", role: .destructive) { Task { await recorder.deleteSensorCopy() } }
-            } message: { Text("Your saved phone file and confirmed AthleteOS copy will be kept.") }
 
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showSettings = false } } }
         }.tint(Midnight.mint).preferredColorScheme(.dark)
@@ -401,8 +377,8 @@ private struct SavedRecordingsView: View {
                         Text(uploader.isUploaded(file.url) ? "Uploaded to AthleteOS" : "Saved on this iPhone").font(.subheadline).foregroundStyle(.secondary)
                         HStack(spacing: 20) {
                             ShareLink(item: file.url) { Label("Export", systemImage: "square.and.arrow.up") }
-                            if !uploader.isUploaded(file.url) {
-                                Button { Task { await upload(file.url) } } label: { Label("Upload", systemImage: "icloud.and.arrow.up") }
+                            Group {
+                                Button { Task { await upload(file.url) } } label: { Label(uploader.isUploaded(file.url) ? "Retry cleanup" : "Upload", systemImage: "icloud.and.arrow.up") }
                                     .disabled(uploader.busy || !uploader.isConnected)
                             }
                         }.font(.subheadline).buttonStyle(.borderless)
@@ -415,7 +391,7 @@ private struct SavedRecordingsView: View {
             .navigationTitle("Saved recordings").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
             .task {
-                do { files = try await RecordingStore().list() } catch { self.error = error.localizedDescription }
+                do { files = try await RecordingStore.shared.list() } catch { self.error = error.localizedDescription }
                 loading = false
             }
         }.tint(Midnight.mint).preferredColorScheme(.dark)

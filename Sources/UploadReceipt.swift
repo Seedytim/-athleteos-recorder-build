@@ -1,6 +1,6 @@
 import Foundation
 
-struct VerifiedArchiveReceipt: Equatable {
+struct VerifiedArchiveReceipt: Equatable, Codable, Sendable {
     let recordingID: String
     let sha256: String
     let processingState: String?
@@ -10,7 +10,9 @@ struct VerifiedArchiveReceipt: Equatable {
 // The server must explicitly confirm that the exact SHA-256 payload is archived.
 enum UploadReceipt {
     static func verifiedArchive(in data: Data, expectedSHA256: String) -> VerifiedArchiveReceipt? {
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        guard expectedSHA256.count == 64,
+              expectedSHA256.allSatisfy({ $0.isHexDigit }),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               json["ok"] as? Bool == true,
               json["archived"] as? Bool == true,
               let archive = json["archive"] as? [String: Any],
@@ -24,7 +26,7 @@ enum UploadReceipt {
         return VerifiedArchiveReceipt(
             recordingID: id,
             sha256: sha.lowercased(),
-            processingState: processing?["state"] as? String
+            processingState: (processing?["state"] as? String) ?? ((json["recording"] as? [String: Any])?["processing_state"] as? String)
         )
     }
 }

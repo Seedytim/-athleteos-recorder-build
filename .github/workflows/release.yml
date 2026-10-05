@@ -1,6 +1,12 @@
 name: Release AthleteOS Recorder
 on:
   workflow_dispatch:
+  # Explicit opt-in on a substantive source commit; never release every push.
+  # This also works when a GitHub client cannot dispatch workflows directly.
+  workflow_run:
+    workflows: ["Validate AthleteOS Recorder"]
+    types: [completed]
+    branches: [main]
 concurrency:
   group: recorder-release
   cancel-in-progress: false
@@ -8,22 +14,35 @@ permissions:
   contents: write
 jobs:
   release:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       contains(github.event.workflow_run.head_commit.message, '[release-recorder]'))
     runs-on: macos-15
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
       - name: Regression tests
         run: |
-          swiftc Sources/RecordingModels.swift Sources/RecordingStore.swift Sources/UploadReceipt.swift Tests/RecorderRegression.swift -o /tmp/recorder-regression
+          swiftc Sources/NightConnectionPolicy.swift Sources/RecordingModels.swift Sources/RecordingStore.swift Sources/UploadReceipt.swift Sources/AthleteOSUploader.swift Tests/RecorderRegression.swift -o /tmp/recorder-regression
           /tmp/recorder-regression
       - name: Install XcodeGen
         run: brew install xcodegen
       - name: Generate Xcode project
         run: xcodegen generate
+      - name: Cache pinned Polar dependencies
+        uses: actions/cache@v4
+        with:
+          path: .swift-packages
+          key: polar-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('project.yml') }}
       - name: Resolve Polar BLE SDK
-        run: xcodebuild -resolvePackageDependencies -project AthleteOSRecorder.xcodeproj -scheme AthleteOSRecorder
+        run: xcodebuild -resolvePackageDependencies -clonedSourcePackagesDirPath .swift-packages -project AthleteOSRecorder.xcodeproj -scheme AthleteOSRecorder
+      - name: Compile iPhone simulator
+        run: xcodebuild -clonedSourcePackagesDirPath .swift-packages -project AthleteOSRecorder.xcodeproj -scheme AthleteOSRecorder -configuration Debug -sdk iphonesimulator -derivedDataPath build-simulator -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build
       - name: Build unsigned device app
-        run: xcodebuild -project AthleteOSRecorder.xcodeproj -scheme AthleteOSRecorder -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build-device CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
+        run: xcodebuild -clonedSourcePackagesDirPath .swift-packages -project AthleteOSRecorder.xcodeproj -scheme AthleteOSRecorder -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build-device CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
       - name: Package unsigned IPA
         run: |
           set -euo pipefail
@@ -42,16 +61,22 @@ jobs:
           SHA256=$(shasum -a 256 AthleteOSRecorder.ipa | awk '{print $1}')
           mkdir -p dist
           cp AthleteOSRecorder.ipa dist/AthleteOSRecorder.ipa
-          python3 - "$VERSION" "$BUILD" "$SIZE" "$SHA256" <<'PY'
+          SOURCE=$(git rev-parse HEAD)
+          python3 - "$VERSION" "$BUILD" "$SIZE" "$SHA256" "$SOURCE" <<'PY'
           import json, sys
-          version, build, size, sha256 = sys.argv[1:]
+          version, build, size, sha256, source = sys.argv[1:]
           with open("dist/build.json","w") as f:
-              json.dump({"version":version,"build":build,"size":int(size),"sha256":sha256},f,indent=2)
+              json.dump({"version":version,"build":build,"size":int(size),"sha256":sha256,"source_commit":source},f,indent=2)
               f.write("\n")
           PY
           git config user.name "Seedytim"
           git config user.email "103544048+Seedytim@users.noreply.github.com"
+          git fetch origin main
+          if [ "$(git rev-parse origin/main)" != "$SOURCE" ]; then
+            echo "main changed during release; refusing to publish a stale IPA."
+            exit 1
+          fi
           git add dist
           if git diff --cached --quiet; then exit 0; fi
           git commit -m "Publish AthleteOS Recorder ${VERSION} (${BUILD})"
-          git push
+          git push origin HEAD:main
