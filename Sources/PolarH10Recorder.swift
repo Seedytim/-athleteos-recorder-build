@@ -471,8 +471,8 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                     )
                 }
 
-                let expectedId = currentExerciseId ?? UserDefaults.standard.string(forKey: Keys.exerciseId)
-                let entry = entries.first(where: { $0.entryId == expectedId }) ?? entries.last!
+                let fallbackExpectedId = currentExerciseId ?? UserDefaults.standard.string(forKey: Keys.exerciseId)
+                let entry = entries.first(where: { $0.entryId == fallbackExpectedId }) ?? entries.last!
                 storedExerciseEntry = entry
                 storedExerciseId = entry.entryId
                 statusText = "Stored RR file found. Reading H10…"
