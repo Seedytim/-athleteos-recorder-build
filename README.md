@@ -9,7 +9,7 @@ The app records Polar H10 sensor-side RR data, saves the raw recording locally, 
 The resulting unsigned IPA is published at `dist/AthleteOSRecorder.ipa` for SideStore to sign/install with the user's own Apple account.
 
 
-## Overnight lifecycle (2.0.2)
+## Overnight lifecycle (2.1.0)
 
 After pairing and the AthleteOS connection, Start night owns reconnect, service
 preparation, H10 start/status verification, and phone release. End night owns
@@ -34,26 +34,11 @@ publication. Validation never updates the IPA or SideStore feed. A manually
 approved release reruns safety checks, simulator and device builds, then publishes
 the IPA with SHA-256/source metadata. It refuses publication if main changed.
 
-## Widget and notifications
+## Notifications
 
-The embedded WidgetKit extension provides small and medium Home Screen widgets.
-Its single control opens the app and runs the same guarded night action. It does
-not cache or guess whether the H10 is recording, and needs no shared App Group or
-Bluetooth connection in the extension. The foreground app owns Bluetooth and raw
-storage. Keep the extension when SideStore signs the eventual approved release.
-
-Enable local notifications in Recorder Settings. Defaults are 21:00 evening and
-07:00 morning, editable in local time. Evening prompts pause while a night awaits
-collection; the one-off morning prompt is cancelled after a durable save. An old
-pending night is not moved forward into another morning on every app launch.
-Verified start/archive and attention alerts are deduplicated across app restarts.
-A notification tap opens Recorder for review; it never implicitly stops a night.
-These are local Recorder notifications, not server-originated AthleteOS/APNs push.
-
-Device acceptance must verify widget availability after SideStore signing, cold
-launch/foreground taps, repeated taps, permission denial/re-enabling, reminders
-with the app closed, and notifications across offline upload/retry and app restart.
-Automated compile cannot prove signing or iOS delivery on the user's phone.
+Recorder uses local iOS notifications for reminders and recording/archive alerts.
+No WidgetKit extension is bundled. Notifications never stop a recording implicitly;
+the foreground app owns Bluetooth actions and raw-data cleanup.
 
 ## Real H10 acceptance test
 
