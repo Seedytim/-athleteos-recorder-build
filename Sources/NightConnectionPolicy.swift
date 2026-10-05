@@ -15,3 +15,13 @@ enum NightConnectionPolicy {
         return .wait
     }
 }
+
+
+enum NightOperation: Equatable { case start, end, archiveSaved }
+
+enum NightActionPolicy {
+    static func afterRecovery(requestedEnd: Bool, recordingOngoing: Bool, pendingFetch: Bool) -> NightOperation {
+        if recordingOngoing || pendingFetch { return .end }
+        return requestedEnd ? .archiveSaved : .start
+    }
+}

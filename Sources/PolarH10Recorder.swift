@@ -125,6 +125,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
     func performNightAction() async {
         guard !nightActionInProgress, !fetchInProgress, !pftpOperationInProgress else { return }
         if deviceId.isEmpty { startScanning(); return }
+        let requestedEnd = recordingOngoing || pendingFetchAvailable
         nightActionInProgress = true
         defer { nightActionInProgress = false }
         clearError()
@@ -142,9 +143,14 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                 }
             }
         }
-        if recordingOngoing || pendingFetchAvailable {
+        switch NightActionPolicy.afterRecovery(requestedEnd: requestedEnd, recordingOngoing: recordingOngoing, pendingFetch: pendingFetchAvailable) {
+        case .end:
             await stopFetchAndSave()
-        } else {
+        case .archiveSaved:
+            // A crash may leave a durable save/receipt ahead of UserDefaults.
+            // An End press completes that night; it must never start another one.
+            statusText = "Night already saved. Completing archive cleanup…"
+        case .start:
             await startRRRecordingAndReleasePhone()
         }
     }
@@ -428,13 +434,13 @@ final class PolarH10Recorder: NSObject, ObservableObject {
             }
 
             let confirmed = try await requestStatusWithTimeout()
-            guard confirmed.ongoing else {
-                fail("Polar accepted the start request but status did not confirm an active recording.")
+            guard confirmed.supported, confirmed.ongoing, confirmed.entryId == exerciseId else {
+                fail("H10 did not confirm this night's recording identity. Recovery information is retained; use End night to check it.")
                 return
             }
 
             recordingOngoing = true
-            currentExerciseId = confirmed.entryId.isEmpty ? exerciseId : confirmed.entryId
+            currentExerciseId = exerciseId
             pendingFetchAvailable = true
             storedExerciseEntry = nil
             storedExerciseId = nil

@@ -60,6 +60,10 @@ struct RecorderRegression {
         precondition(step(timedOut: true, attempt: 1) == .failed)
         precondition(step(deadline: true, attempt: 1) == .failed)
         precondition(step(on: false, connected: true, record: true, transfer: true) == .failed)
+        precondition(NightActionPolicy.afterRecovery(requestedEnd: true, recordingOngoing: false, pendingFetch: false) == .archiveSaved, "Crash-recovered End must never start a new night")
+        precondition(NightActionPolicy.afterRecovery(requestedEnd: true, recordingOngoing: false, pendingFetch: true) == .end)
+        precondition(NightActionPolicy.afterRecovery(requestedEnd: false, recordingOngoing: false, pendingFetch: false) == .start)
+        precondition(NightActionPolicy.afterRecovery(requestedEnd: false, recordingOngoing: true, pendingFetch: false) == .end)
         print("PASS: disconnected connection ownership, both services required, PFTP arbitration, bounded reconnect, Bluetooth loss")
     }
 
