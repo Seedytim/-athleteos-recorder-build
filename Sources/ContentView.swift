@@ -21,7 +21,7 @@ struct ContentView: View {
         let count = savedFiles.count
         let uploadedCount = savedFiles.filter { uploader.isUploaded($0.url) }.count
         if count == 0 { return "No recordings yet" }
-        return "\(count) saved · \(uploadedCount) uploaded"
+        return uploadedCount > 0 ? "\(count) waiting · \(uploadedCount) verified" : "\(count) waiting to archive"
     }
     private var latestFile: URL? { recorder.lastSavedFile ?? savedFiles.first?.url }
     private var latestUploaded: Bool { latestFile.map { uploader.isUploaded($0) } ?? false }
@@ -112,10 +112,30 @@ struct ContentView: View {
             .toolbar(.hidden, for: .navigationBar)
             .sheet(isPresented: $showSettings) { settings }
             .sheet(isPresented: $showRecordings, onDismiss: { Task { await refreshSavedFiles() } }) { recordings }
-            .task { await refreshSavedFiles() }
-            .onChange(of: recorder.lastSavedFile) { _ in Task { await refreshSavedFiles() } }
+            .task {
+                await processPendingUploads()
+                await refreshSavedFiles()
+            }
+            .onChange(of: recorder.lastSavedFile) { _ in
+                Task {
+                    await processPendingUploads()
+                    await refreshSavedFiles()
+                }
+            }
+            .onChange(of: uploader.isConnected) { connected in
+                if connected { Task { await processPendingUploads() } }
+            }
+            .onChange(of: recorder.connectionState) { state in
+                if state == .connected { Task { await recorder.cleanupQueuedSensorCopies() } }
+            }
             .onChange(of: scenePhase) { phase in
-                if phase == .active { Task { await refreshSavedFiles() } }
+                if phase == .active {
+                    Task {
+                        await processPendingUploads()
+                        await recorder.cleanupQueuedSensorCopies()
+                        await refreshSavedFiles()
+                    }
+                }
             }
         }
         .tint(Midnight.mint).preferredColorScheme(.dark)
@@ -232,9 +252,7 @@ struct ContentView: View {
             .fixedSize(horizontal: false, vertical: true).padding(16).frame(maxWidth: .infinity, alignment: .leading).midnightCard()
     }
     private func primaryAction() {
-        if let file = recorder.lastSavedFile, !uploaded {
-            if uploader.isConnected { Task { await upload(file) } } else { showSettings = true }
-        } else if recorder.connectionState == .disconnected {
+        if recorder.connectionState == .disconnected {
             if recorder.scanning { recorder.stopScanning() }
             else if recorder.deviceId.isEmpty { recorder.startScanning() }
             else { recorder.connect() }
@@ -244,13 +262,37 @@ struct ContentView: View {
             Task {
                 if recorder.recordingOngoing || recorder.pendingFetchAvailable {
                     await recorder.stopFetchAndSave()
-                    if let file = recorder.lastSavedFile, uploader.isConnected { await upload(file) }
-                } else { await recorder.startRRRecordingAndReleasePhone() }
+                    await processPendingUploads()
+                } else {
+                    await recorder.startRRRecordingAndReleasePhone()
+                }
             }
         }
     }
+
     private func upload(_ file: URL) async {
-        if await uploader.upload(fileURL: file) { recorder.markAthleteOSUploadConfirmed(for: file) }
+        let store = RecordingStore()
+        let exerciseId = try? await store.exerciseId(for: file)
+        guard await uploader.upload(fileURL: file) != nil else { return }
+        do {
+            try await store.delete(file)
+            recorder.markArchiveConfirmedAndLocalDeleted(for: file, exerciseId: exerciseId ?? nil)
+            await recorder.cleanupQueuedSensorCopies()
+            await refreshSavedFiles()
+        } catch {
+            // The archive is verified. Keeping an undeleted local duplicate is safe;
+            // it will be retried and deduplicated by SHA-256 later.
+        }
+    }
+
+    private func processPendingUploads() async {
+        guard uploader.isConnected, !uploader.busy else { return }
+        let store = RecordingStore()
+        guard let files = try? await store.list() else { return }
+        for file in files.reversed() {
+            if uploader.busy { break }
+            await upload(file.url)
+        }
     }
     private var settings: some View {
         NavigationStack {
