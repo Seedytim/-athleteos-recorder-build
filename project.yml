@@ -19,8 +19,8 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: nz.co.athleteos.recorder
-        MARKETING_VERSION: 1.9
-        CURRENT_PROJECT_VERSION: 10
+        MARKETING_VERSION: 2.0
+        CURRENT_PROJECT_VERSION: 11
         SWIFT_VERSION: 5.9
     info:
       path: Resources/Info.plist

@@ -36,9 +36,27 @@ jobs:
           -scheme AthleteOSRecorder
           -configuration Debug
           -sdk iphonesimulator
+          -derivedDataPath build-simulator
           -destination 'generic/platform=iOS Simulator'
           CODE_SIGNING_ALLOWED=NO
           build
+
+      - name: Capture iPhone preview
+        run: |
+          set -euo pipefail
+          DEVICE=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(x["udid"] for values in d["devices"].values() for x in values if "iPhone" in x["name"]))')
+          xcrun simctl boot "$DEVICE"
+          xcrun simctl bootstatus "$DEVICE" -b
+          xcrun simctl install "$DEVICE" build-simulator/Build/Products/Debug-iphonesimulator/AthleteOSRecorder.app
+          xcrun simctl launch "$DEVICE" nz.co.athleteos.recorder --ui-preview
+          sleep 5
+          xcrun simctl io "$DEVICE" screenshot midnight-preview.png
+
+      - name: Upload iPhone preview
+        uses: actions/upload-artifact@v4
+        with:
+          name: midnight-preview
+          path: midnight-preview.png
 
       - name: Build unsigned device app
         run: >

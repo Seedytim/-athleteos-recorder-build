@@ -9,12 +9,27 @@ final class AthleteOSUploader: ObservableObject {
     @Published private(set) var busy = false
     @Published private(set) var statusText = "Connect AthleteOS once to upload saved RR recordings automatically."
     @Published private(set) var lastUploadedRecordingId: String?
+    @Published private(set) var lastError: String?
+    @Published private(set) var uploadedFileNames: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "athleteos.uploadedFileNames") ?? [])
+
+    func isUploaded(_ file: URL) -> Bool { uploadedFileNames.contains(file.lastPathComponent) }
+
+    private func rememberUpload(_ file: URL) {
+        uploadedFileNames.insert(file.lastPathComponent)
+        UserDefaults.standard.set(Array(uploadedFileNames), forKey: "athleteos.uploadedFileNames")
+    }
 
     private let endpoint = URL(string: "https://bjdpzxbfpgmzwcdgzqso.supabase.co/functions/v1/ingest-hrv-logger")!
     private let keychainService = "nz.co.athleteos.recorder"
     private let keychainAccount = "overnight-ingest-token"
 
     init() {
+        if let path = UserDefaults.standard.string(forKey: "h10.lastSavedFilePath"),
+           let exercise = UserDefaults.standard.string(forKey: "h10.exerciseId"),
+           UserDefaults.standard.string(forKey: "h10.uploadedExerciseId") == exercise {
+            uploadedFileNames.insert(URL(fileURLWithPath: path).lastPathComponent)
+            UserDefaults.standard.set(Array(uploadedFileNames), forKey: "athleteos.uploadedFileNames")
+        }
         isConnected = readToken() != nil
         if isConnected {
             statusText = "AthleteOS connection key saved securely on this iPhone."
@@ -41,6 +56,8 @@ final class AthleteOSUploader: ObservableObject {
     }
 
     func connect() async {
+        guard !busy else { return }
+        lastError = nil
         let token = connectionKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard token.count >= 32 else {
             statusText = "Paste the Recorder connection key from AthleteOS first."
@@ -51,7 +68,7 @@ final class AthleteOSUploader: ObservableObject {
         defer { busy = false }
 
         do {
-            var request = URLRequest(url: endpoint)
+            var request = URLRequest(url: endpoint, timeoutInterval: 90)
             request.httpMethod = "GET"
             request.setValue(token, forHTTPHeaderField: "X-AthleteOS-Ingest-Token")
             request.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -70,10 +87,13 @@ final class AthleteOSUploader: ObservableObject {
             statusText = "Connected to AthleteOS. Saved recordings will upload automatically."
         } catch {
             statusText = "AthleteOS connection failed: \(friendly(error))"
+            lastError = statusText
         }
     }
 
     func disconnect() {
+        guard !busy else { return }
+        lastError = nil
         deleteToken()
         connectionKeyDraft = ""
         isConnected = false
@@ -82,6 +102,8 @@ final class AthleteOSUploader: ObservableObject {
     }
 
     func upload(fileURL: URL) async -> Bool {
+        guard !busy else { return false }
+        lastError = nil
         guard let token = readToken() else {
             isConnected = false
             statusText = "Connect AthleteOS before deleting the H10 sensor copy."
@@ -93,16 +115,14 @@ final class AthleteOSUploader: ObservableObject {
         defer { busy = false }
 
         do {
-            let data = try Data(contentsOf: fileURL)
-            var request = URLRequest(url: endpoint)
+            var request = URLRequest(url: endpoint, timeoutInterval: 90)
             request.httpMethod = "POST"
-            request.httpBody = data
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.setValue("application/json", forHTTPHeaderField: "Accept")
             request.setValue(fileURL.lastPathComponent, forHTTPHeaderField: "X-File-Name")
             request.setValue(token, forHTTPHeaderField: "X-AthleteOS-Ingest-Token")
 
-            let (responseData, response) = try await URLSession.shared.data(for: request)
+            let (responseData, response) = try await URLSession.shared.upload(for: request, fromFile: fileURL)
             guard let http = response as? HTTPURLResponse else {
                 throw UploadError.invalidResponse
             }
@@ -121,6 +141,7 @@ final class AthleteOSUploader: ObservableObject {
                 lastUploadedRecordingId = recording["id"] as? String
             }
 
+            rememberUpload(fileURL)
             isConnected = true
             statusText = duplicate
                 ? "AthleteOS confirmed this RR recording was already stored."
@@ -128,6 +149,7 @@ final class AthleteOSUploader: ObservableObject {
             return true
         } catch {
             statusText = "AthleteOS upload failed: \(friendly(error)). Local and H10 copies are retained."
+            lastError = statusText
             return false
         }
     }

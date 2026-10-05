@@ -83,6 +83,21 @@ final class PolarH10Recorder: NSObject, ObservableObject {
             savedExerciseId != nil && uploadedExerciseId == savedExerciseId
         super.init()
 
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--ui-preview") {
+            bluetoothOn = true
+            connectionState = .connected
+            h10RecordingFeatureReady = true
+            fileTransferFeatureReady = true
+            batteryPercent = 82
+            currentExerciseId = nil
+            pendingFetchAvailable = false
+            lastSavedFile = nil
+            athleteOSUploadConfirmed = false
+            return
+        }
+        #endif
+
         api.observer = self
         api.powerStateObserver = self
         api.deviceFeaturesObserver = self
@@ -789,14 +804,14 @@ extension PolarH10Recorder: PolarBleApiDeviceInfoObserver {
     nonisolated func disInformationReceived(_ identifier: String, uuid: CBUUID, value: String) {
         guard uuid == CBUUID(string: "2A26") else { return }
         Task { @MainActor in
-            self.firmwareVersion = value
+            self.firmwareVersion = value.replacingOccurrences(of: "\u{0000}", with: "")
         }
     }
 
     nonisolated func disInformationReceivedWithKeysAsStrings(_ identifier: String, key: String, value: String) {
         guard key.uppercased() == "2A26" || key.uppercased().contains("FIRMWARE") else { return }
         Task { @MainActor in
-            self.firmwareVersion = value
+            self.firmwareVersion = value.replacingOccurrences(of: "\u{0000}", with: "")
         }
     }
 }
