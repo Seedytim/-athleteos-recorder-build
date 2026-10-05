@@ -272,11 +272,13 @@ struct ContentView: View {
 
     private func upload(_ file: URL) async {
         let store = RecordingStore()
-        let exerciseId = try? await store.exerciseId(for: file)
+        let exerciseId: String?
+        do { exerciseId = try await store.exerciseId(for: file) }
+        catch { exerciseId = nil }
         guard await uploader.upload(fileURL: file) != nil else { return }
         do {
             try await store.delete(file)
-            recorder.markArchiveConfirmedAndLocalDeleted(for: file, exerciseId: exerciseId ?? nil)
+            recorder.markArchiveConfirmedAndLocalDeleted(for: file, exerciseId: exerciseId)
             await recorder.cleanupQueuedSensorCopies()
             await refreshSavedFiles()
         } catch {
