@@ -1,128 +1,30 @@
-name: Build AthleteOS Recorder
-# Public build-only workflow; no AthleteOS secrets are used.
-
+name: Validate AthleteOS Recorder
 on:
-  workflow_dispatch:
   push:
     branches: [main]
-    paths:
-      - "Sources/**"
-      - "Tests/**"
-      - "project.yml"
-      - ".github/workflows/build.yml"
-
+    paths: ["Sources/**","Tests/**","project.yml",".github/workflows/build.yml",".github/workflows/release.yml"]
+  pull_request:
+    paths: ["Sources/**","Tests/**","project.yml"]
 concurrency:
-  group: recorder-${{ github.ref }}
+  group: recorder-validate-${{ github.ref }}
   cancel-in-progress: true
-
 permissions:
-  contents: write
-
+  contents: read
 jobs:
-  build:
+  validate:
     runs-on: macos-15
-    timeout-minutes: 20
+    timeout-minutes: 12
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Verify receipt and raw-file safety
+      - uses: actions/checkout@v4
+      - name: Regression tests
         run: |
           swiftc Sources/RecordingModels.swift Sources/RecordingStore.swift Sources/UploadReceipt.swift Tests/RecorderRegression.swift -o /tmp/recorder-regression
           /tmp/recorder-regression
-
       - name: Install XcodeGen
         run: brew install xcodegen
-
       - name: Generate Xcode project
         run: xcodegen generate
-
       - name: Resolve Polar BLE SDK
         run: xcodebuild -resolvePackageDependencies -project AthleteOSRecorder.xcodeproj -scheme AthleteOSRecorder
-
-      - name: Build simulator
-        run: >
-          xcodebuild
-          -project AthleteOSRecorder.xcodeproj
-          -scheme AthleteOSRecorder
-          -configuration Debug
-          -sdk iphonesimulator
-          -derivedDataPath build-simulator
-          -destination 'generic/platform=iOS Simulator'
-          CODE_SIGNING_ALLOWED=NO
-          build
-
-      - name: Build unsigned device app
-        run: >
-          xcodebuild
-          -project AthleteOSRecorder.xcodeproj
-          -scheme AthleteOSRecorder
-          -configuration Release
-          -sdk iphoneos
-          -destination 'generic/platform=iOS'
-          -derivedDataPath build-device
-          CODE_SIGNING_ALLOWED=NO
-          CODE_SIGNING_REQUIRED=NO
-          build
-
-      - name: Package unsigned IPA
-        run: |
-          set -euo pipefail
-          rm -rf Payload AthleteOSRecorder.ipa
-          mkdir Payload
-          cp -R build-device/Build/Products/Release-iphoneos/AthleteOSRecorder.app Payload/
-          zip -qry AthleteOSRecorder.ipa Payload
-          test -s AthleteOSRecorder.ipa
-
-      - name: Publish stable build artifact
-        run: |
-          set -euo pipefail
-          APP="build-device/Build/Products/Release-iphoneos/AthleteOSRecorder.app"
-          VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Info.plist")
-          BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP/Info.plist")
-          SIZE=$(stat -f%z AthleteOSRecorder.ipa)
-          SHA256=$(shasum -a 256 AthleteOSRecorder.ipa | awk '{print $1}')
-          mkdir -p dist
-          cp AthleteOSRecorder.ipa dist/AthleteOSRecorder.ipa
-          python3 - "$VERSION" "$BUILD" "$SIZE" "$SHA256" <<'PY'
-          import json, sys
-          version, build, size, sha256 = sys.argv[1:]
-          with open("dist/build.json","w") as f:
-              json.dump({
-                  "version": version,
-                  "build": build,
-                  "size": int(size),
-                  "sha256": sha256,
-              }, f, indent=2)
-              f.write("\n")
-          PY
-          git config user.name "Seedytim"
-          git config user.email "103544048+Seedytim@users.noreply.github.com"
-          git add dist
-          if git diff --cached --quiet; then
-            echo "Build artifact unchanged."
-            exit 0
-          fi
-          git commit -m "Publish AthleteOS Recorder ${VERSION} (${BUILD})"
-          git push
-
-      - name: Capture iPhone preview
-        timeout-minutes: 3
-        continue-on-error: true
-        run: |
-          set -euo pipefail
-          DEVICE=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(x["udid"] for values in d["devices"].values() for x in values if "iPhone" in x["name"]))')
-          xcrun simctl boot "$DEVICE"
-          xcrun simctl bootstatus "$DEVICE" -b
-          xcrun simctl install "$DEVICE" build-simulator/Build/Products/Debug-iphonesimulator/AthleteOSRecorder.app
-          xcrun simctl launch "$DEVICE" nz.co.athleteos.recorder --ui-preview
-          sleep 5
-          xcrun simctl io "$DEVICE" screenshot midnight-preview.png
-
-      - name: Upload iPhone preview
-        if: hashFiles('midnight-preview.png') != ''
-        uses: actions/upload-artifact@v4
-        with:
-          name: midnight-preview
-          path: midnight-preview.png
-
+      - name: Compile iPhone simulator
+        run: xcodebuild -project AthleteOSRecorder.xcodeproj -scheme AthleteOSRecorder -configuration Debug -sdk iphonesimulator -derivedDataPath build-simulator -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build
