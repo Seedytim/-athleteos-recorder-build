@@ -13,11 +13,9 @@ struct AthleteOSRecorderApp: App {
                 .onOpenURL { url in
                     Task {
                         guard await uploader.handleConnectionURL(url) else { return }
-                        if let file = recorder.lastSavedFile, !recorder.athleteOSUploadConfirmed {
-                            if await uploader.upload(fileURL: file) {
-                                recorder.markAthleteOSUploadConfirmed(for: file)
-                            }
-                        }
+                        // ContentView owns the durable pending-file queue. Once
+                        // connected, its connection observer archives every saved file
+                        // and only deletes local data after a verified SHA receipt.
                     }
                 }
         }
