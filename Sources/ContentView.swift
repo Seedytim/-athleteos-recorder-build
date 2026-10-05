@@ -143,14 +143,14 @@ struct ContentView: View {
                             await recorder.startRRRecordingAndReleasePhone()
                         }
                     }
-                    .disabled(!recorder.h10RecordingFeatureReady || recorder.recordingOngoing || recorder.fetchInProgress)
+                    .disabled(!recorder.h10RecordingFeatureReady || recorder.recordingOngoing || recorder.fetchInProgress || recorder.pftpOperationInProgress)
 
                     Button("Refresh Status") {
                         Task {
                             await recorder.refreshRecordingStatus()
                         }
                     }
-                    .disabled(!recorder.h10RecordingFeatureReady || recorder.fetchInProgress)
+                    .disabled(!recorder.h10RecordingFeatureReady || recorder.fetchInProgress || recorder.pftpOperationInProgress)
 
                     Button("Stop, Fetch & Save") {
                         Task {
@@ -159,7 +159,7 @@ struct ContentView: View {
                             await uploadIfNewOrPending(previous: before)
                         }
                     }
-                    .disabled(!recorder.h10RecordingFeatureReady || recorder.fetchInProgress || uploader.busy)
+                    .disabled(!recorder.h10RecordingFeatureReady || recorder.fetchInProgress || recorder.pftpOperationInProgress || uploader.busy)
 
                     if recorder.pendingFetchAvailable && !recorder.recordingOngoing && recorder.lastSavedFile == nil {
                         Button("Retry Fetch") {
@@ -190,6 +190,7 @@ struct ContentView: View {
                                     await recorder.deleteSensorCopy()
                                 }
                             }
+                            .disabled(recorder.fetchInProgress || recorder.pftpOperationInProgress)
                         } else {
                             Text("The H10 copy stays protected until AthleteOS confirms the upload.")
                                 .font(.footnote)
