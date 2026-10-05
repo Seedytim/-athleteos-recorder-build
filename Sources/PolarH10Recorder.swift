@@ -78,6 +78,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         self.pendingFetchAvailable = savedExerciseId != nil
         if let savedFilePath, FileManager.default.fileExists(atPath: savedFilePath) {
             self.lastSavedFile = URL(fileURLWithPath: savedFilePath)
+            self.pendingFetchAvailable = false
         }
         self.athleteOSUploadConfirmed =
             savedExerciseId != nil && uploadedExerciseId == savedExerciseId
@@ -137,6 +138,8 @@ final class PolarH10Recorder: NSObject, ObservableObject {
 
                     let found = NearbyH10(id: device.deviceId, name: name, rssi: device.rssi)
                     if let index = self.nearbyH10s.firstIndex(where: { $0.id == found.id }) {
+                        let previous = self.nearbyH10s[index]
+                        guard previous.name != found.name || abs(previous.rssi - found.rssi) >= 5 else { continue }
                         self.nearbyH10s[index] = found
                     } else {
                         self.nearbyH10s.append(found)

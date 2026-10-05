@@ -7,6 +7,7 @@ on:
     branches: [main]
     paths:
       - "Sources/**"
+      - "Tests/**"
       - "project.yml"
       - ".github/workflows/build.yml"
 
@@ -19,6 +20,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Verify receipt and raw-file safety
+        run: |
+          swiftc Sources/RecordingModels.swift Sources/RecordingStore.swift Sources/UploadReceipt.swift Tests/RecorderRegression.swift -o /tmp/recorder-regression
+          /tmp/recorder-regression
 
       - name: Install XcodeGen
         run: brew install xcodegen

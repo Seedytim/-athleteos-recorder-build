@@ -23,7 +23,7 @@ struct ContentView: View {
     }
     private var title: String {
         if recorder.fetchInProgress { return "Saving your recording" }
-        if uploader.busy { return "Connecting to AthleteOS" }
+        if uploader.busy { return uploader.isConnected ? "Uploading your recording" : "Connecting to AthleteOS" }
         if sensorBusy { return "Talking to your H10" }
         if recorder.recordingOngoing { return "Recording on H10" }
         if recorder.lastSavedFile != nil { return uploaded ? "Recording saved" : "Ready to upload" }
@@ -73,7 +73,7 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, minHeight: 60)
                     }
                     .buttonStyle(MidnightPrimaryButton())
-                    .disabled(busy || recorder.connectionState == .connecting || (!recorder.bluetoothOn && recorder.lastSavedFile == nil) || (recorder.connectionState == .connected && !ready && recorder.lastSavedFile == nil))
+                    .disabled(busy || recorder.connectionState == .connecting || (!recorder.bluetoothOn && recorder.lastSavedFile == nil) || (recorder.connectionState == .connected && !ready && (recorder.lastSavedFile == nil || uploaded)))
                     nearbySensors
                     if let error = recorder.lastError { notice(error, icon: "exclamationmark.triangle", color: .orange) }
                     if let error = uploader.lastError { notice(error, icon: "icloud.slash", color: .orange) }

@@ -37,6 +37,7 @@ final class AthleteOSUploader: ObservableObject {
     }
 
     func handleConnectionURL(_ url: URL) async -> Bool {
+        guard !busy else { return false }
         guard url.scheme == "athleteos-recorder", url.host == "connect" else {
             statusText = "That AthleteOS link is not a Recorder connection link."
             return false
@@ -137,10 +138,10 @@ final class AthleteOSUploader: ObservableObject {
 
             let json = (try? JSONSerialization.jsonObject(with: responseData)) as? [String: Any]
             let duplicate = json?["duplicate"] as? Bool ?? false
-            if let recording = json?["recording"] as? [String: Any] {
-                lastUploadedRecordingId = recording["id"] as? String
+            guard let confirmedID = UploadReceipt.recordingID(in: responseData) else {
+                throw UploadError.rejected(status: http.statusCode, detail: "AthleteOS has not confirmed a completed recording yet. Please retry.")
             }
-
+            lastUploadedRecordingId = confirmedID
             rememberUpload(fileURL)
             isConnected = true
             statusText = duplicate
