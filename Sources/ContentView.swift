@@ -13,6 +13,18 @@ struct ContentView: View {
     @State private var showSettings = false
     @State private var showRecordings = false
     @State private var confirmDelete = false
+    @State private var savedFiles: [SavedRecordingFile] = []
+    @Environment(\.scenePhase) private var scenePhase
+    @ScaledMetric(relativeTo: .title) private var heroDiameter = 132.0
+
+    private var savedSummary: String {
+        let count = savedFiles.count
+        let uploadedCount = savedFiles.filter { uploader.isUploaded($0.url) }.count
+        if count == 0 { return "No recordings yet" }
+        return "\(count) saved · \(uploadedCount) uploaded"
+    }
+    private var latestFile: URL? { recorder.lastSavedFile ?? savedFiles.first?.url }
+    private var latestUploaded: Bool { latestFile.map { uploader.isUploaded($0) } ?? false }
 
     private var sensorBusy: Bool { recorder.fetchInProgress || recorder.pftpOperationInProgress }
     private var busy: Bool { sensorBusy || uploader.busy }
@@ -60,7 +72,7 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: 22) {
+                VStack(spacing: 16) {
                     header
                     sensorCard
                     hero
@@ -79,74 +91,115 @@ struct ContentView: View {
                     if let error = uploader.lastError { notice(error, icon: "icloud.slash", color: .orange) }
                     VStack(spacing: 12) {
                         Button { showRecordings = true } label: {
-                            row(icon: "list.bullet.rectangle", title: "Saved recordings", subtitle: "View files and upload status")
+                            row(icon: "list.bullet", title: "Saved recordings", subtitle: savedSummary)
                         }.buttonStyle(.plain)
-                        Button { showSettings = true } label: {
-                            row(icon: uploaded ? "checkmark.icloud" : "icloud", title: uploaded ? "Uploaded to AthleteOS" : "AthleteOS", subtitle: uploader.isConnected ? "Connected · automatic upload after saving" : "Connect once to upload your recordings")
+                        Button {
+                            if latestFile != nil { showRecordings = true } else { showSettings = true }
+                        } label: {
+                            latestRecordingRow
                         }.buttonStyle(.plain)
                     }
-                    Label("Saved on your phone before upload", systemImage: "lock.shield")
+                    Label("Saved on your phone before upload", systemImage: "lock.fill")
                         .font(.caption).foregroundStyle(Midnight.secondary)
                         .frame(maxWidth: .infinity).padding(.bottom, 14)
                 }
-                .padding(22).frame(maxWidth: 560).frame(maxWidth: .infinity)
+                .padding(.horizontal, 22).padding(.top, 16).padding(.bottom, 8)
+                .frame(maxWidth: 560).frame(maxWidth: .infinity)
             }
             .background(Midnight.background.ignoresSafeArea())
             .toolbar(.hidden, for: .navigationBar)
             .sheet(isPresented: $showSettings) { settings }
-            .sheet(isPresented: $showRecordings) { recordings }
+            .sheet(isPresented: $showRecordings, onDismiss: { Task { await refreshSavedFiles() } }) { recordings }
+            .task { await refreshSavedFiles() }
+            .onChange(of: recorder.lastSavedFile) { _ in Task { await refreshSavedFiles() } }
+            .onChange(of: scenePhase) { phase in
+                if phase == .active { Task { await refreshSavedFiles() } }
+            }
         }
         .tint(Midnight.mint).preferredColorScheme(.dark)
     }
 
+    private func refreshSavedFiles() async {
+        do { savedFiles = try await RecordingStore().list() }
+        catch { /* The recordings sheet presents storage errors with retry context. */ }
+    }
     private var header: some View {
-        HStack(alignment: .center) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text("ATHLETEOS").font(.caption.weight(.bold)).tracking(2.4).foregroundStyle(Midnight.mint)
-                Text("Recorder").font(.largeTitle.weight(.bold))
-            }
-            Spacer()
+        HStack(spacing: 8) {
+            Text("AthleteOS Recorder")
+                .font(.system(.title2).weight(.bold))
+                .lineLimit(1).minimumScaleFactor(0.8)
+                .accessibilityAddTraits(.isHeader)
+            Spacer(minLength: 0)
             Button { showSettings = true } label: {
-                Image(systemName: "gearshape").font(.title3).frame(width: 48, height: 48)
-                    .background(Midnight.card, in: Circle())
-            }.buttonStyle(.plain).accessibilityLabel("Recorder settings")
+                Image(systemName: "gearshape").font(.title3)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }.buttonStyle(.plain).foregroundStyle(.white)
+                .accessibilityLabel("Recorder settings")
         }
+    }
+    private var connectionLabel: String {
+        if recorder.recordingOngoing && recorder.connectionState == .disconnected { return "Recording offline" }
+        if recorder.scanning { return "Searching" }
+        return recorder.connectionState.rawValue
     }
     private var sensorCard: some View {
         HStack(spacing: 14) {
-            Image(systemName: "sensor.tag.radiowaves.forward.fill").font(.title2).foregroundStyle(Midnight.mint)
-                .frame(width: 42, height: 42)
-            VStack(alignment: .leading, spacing: 7) {
-                HStack(spacing: 7) {
-                    Circle().fill(recorder.connectionState == .connected ? Midnight.mint : .orange).frame(width: 7, height: 7)
-                    Text("Polar H10").font(.headline)
+            H10SensorIllustration().frame(width: 58, height: 38).accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .firstTextBaseline, spacing: 7) {
+                    Circle().fill(recorder.connectionState == .connected ? Midnight.mint : .orange)
+                        .frame(width: 8, height: 8)
+                    (Text("Polar H10 · ").foregroundColor(.white) + Text(connectionLabel)
+                        .foregroundColor(recorder.connectionState == .connected ? Midnight.mint : Midnight.secondary))
+                        .font(.subheadline).fixedSize(horizontal: false, vertical: true)
                 }
-                Text(recorder.recordingOngoing && recorder.connectionState == .disconnected ? "Recording · phone disconnected" : recorder.connectionState.rawValue)
-                    .font(.caption).foregroundStyle(Midnight.secondary)
+                if let battery = recorder.batteryPercent {
+                    Label("Battery \(battery)%", systemImage: battery < 20 ? "battery.25percent" : "battery.75percent")
+                        .font(.caption).foregroundStyle(battery < 20 ? Color.orange : Midnight.secondary)
+                        .accessibilityLabel("Last reported sensor battery \(battery) percent")
+                } else {
+                    Text(recorder.bluetoothOn ? "Battery available after connection" : "Turn on Bluetooth to connect")
+                        .font(.caption).foregroundStyle(Midnight.secondary)
+                }
             }
-            Spacer(minLength: 4)
-            if let battery = recorder.batteryPercent {
-                VStack(spacing: 5) {
-                    Image(systemName: battery < 20 ? "battery.25percent" : "battery.75percent")
-                    Text("\(battery)%").font(.caption.monospacedDigit())
-                }.foregroundStyle(battery < 20 ? Color.orange : Midnight.secondary)
-                .accessibilityLabel("Last reported sensor battery \(battery) percent")
-            }
-        }.padding(16).midnightCard()
+            Spacer(minLength: 0)
+        }.padding(16).frame(maxWidth: .infinity, alignment: .leading).midnightCard()
     }
     private var hero: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: 12) {
             ZStack {
-                Circle().fill(Midnight.mint.opacity(0.045)).frame(width: 166, height: 166)
-                Circle().stroke(Midnight.mint.opacity(0.12), lineWidth: 12).frame(width: 138, height: 138)
-                Circle().stroke(Midnight.mint, lineWidth: 2.5).frame(width: 130, height: 130)
+                Circle().fill(RadialGradient(colors: [Midnight.mint.opacity(0.13), Midnight.mint.opacity(0.025)], center: .center, startRadius: 40, endRadius: heroDiameter * 0.65))
+                    .frame(width: heroDiameter + 26, height: heroDiameter + 26)
+                Circle().stroke(Midnight.mint.opacity(0.055), lineWidth: 14)
+                    .frame(width: heroDiameter + 8, height: heroDiameter + 8)
+                Circle().stroke(Midnight.mint, lineWidth: 3)
+                    .frame(width: heroDiameter, height: heroDiameter)
+                    .shadow(color: Midnight.mint.opacity(0.18), radius: 18)
                 Image(systemName: uploaded ? "checkmark" : recorder.recordingOngoing ? "heart.fill" : "heart")
-                    .font(.system(size: 43, weight: .light)).foregroundStyle(Midnight.mint)
-            }.accessibilityHidden(true)
-            Text(title).font(.system(.title, design: .rounded).weight(.bold)).multilineTextAlignment(.center)
+                    .font(.system(size: 44, weight: .light)).foregroundStyle(Midnight.mint)
+            }.accessibilityHidden(true).padding(.bottom, 2)
+            Text(title).font(.system(.title).weight(.bold)).multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true).accessibilityAddTraits(.isHeader)
             Text(subtitle).font(.subheadline).foregroundStyle(Midnight.secondary)
                 .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
-        }.padding(.vertical, 6).frame(maxWidth: .infinity)
+                .frame(maxWidth: 310)
+        }.padding(.top, 6).padding(.bottom, 2).frame(maxWidth: .infinity)
+    }
+    private var latestRecordingRow: some View {
+        HStack(spacing: 14) {
+            Image(systemName: latestUploaded ? "icloud.and.arrow.up" : "icloud")
+                .font(.title3).foregroundStyle(Midnight.mint).frame(width: 28)
+            VStack(alignment: .leading, spacing: 5) {
+                Text(latestFile == nil ? "AthleteOS connection" : "Latest recording")
+                    .font(.caption).foregroundStyle(Midnight.secondary)
+                Text(latestFile != nil ? (latestUploaded ? "Uploaded to AthleteOS" : "Saved on your phone") : (uploader.isConnected ? "Connected to AthleteOS" : "Connect to AthleteOS"))
+                    .font(.subheadline.weight(.semibold))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+            Image(systemName: "chevron.right").font(.caption).foregroundStyle(Midnight.secondary)
+        }.padding(18).frame(maxWidth: .infinity, alignment: .leading).midnightCard()
     }
     @ViewBuilder private var nearbySensors: some View {
         if recorder.scanning {
@@ -304,13 +357,32 @@ private struct MidnightPrimaryButton: ButtonStyle {
     @Environment(\.isEnabled) private var enabled
     func makeBody(configuration: Configuration) -> some View {
         configuration.label.foregroundStyle(.black)
-            .background(Midnight.mint.opacity(enabled ? (configuration.isPressed ? 0.75 : 1) : 0.4), in: RoundedRectangle(cornerRadius: 18))
+             .background(LinearGradient(colors: [Midnight.mint, Color(red: 0.33, green: 0.96, blue: 0.72)], startPoint: .leading, endPoint: .trailing), in: RoundedRectangle(cornerRadius: 18))
+            .opacity(enabled ? (configuration.isPressed ? 0.8 : 1) : 0.4)
             .scaleEffect(configuration.isPressed ? 0.985 : 1)
     }
 }
 private extension View {
     func midnightCard() -> some View {
-        background(Midnight.card, in: RoundedRectangle(cornerRadius: 20))
+        background(LinearGradient(colors: [Midnight.card, Midnight.card.opacity(0.78)], startPoint: .topLeading, endPoint: .bottomTrailing), in: RoundedRectangle(cornerRadius: 20))
             .overlay(RoundedRectangle(cornerRadius: 20).stroke(.white.opacity(0.08), lineWidth: 1))
+    }
+}
+
+// Vector artwork stays sharp at every screen size without a bundled bitmap.
+private struct H10SensorIllustration: View {
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 4).fill(Color(white: 0.065))
+                .frame(width: 58, height: 22)
+                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color(white: 0.2), lineWidth: 1))
+            RoundedRectangle(cornerRadius: 8).fill(Color(white: 0.035))
+                .frame(width: 40, height: 28)
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color(white: 0.24), lineWidth: 1))
+            RoundedRectangle(cornerRadius: 6)
+                .fill(LinearGradient(colors: [Color(white: 0.14), Color(white: 0.065)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                .frame(width: 30, height: 22)
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color(white: 0.28), lineWidth: 0.6))
+        }.shadow(color: .black.opacity(0.5), radius: 4, y: 3)
     }
 }
