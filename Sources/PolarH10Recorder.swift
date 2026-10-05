@@ -680,6 +680,16 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         statusText = "Saved locally and confirmed in AthleteOS. H10 copy can now be deleted."
     }
 
+    func markArchiveConfirmedAndLocalDeleted(for file: URL, exerciseId: String?) {
+        if let lastSavedFile, lastSavedFile.standardizedFileURL == file.standardizedFileURL {
+            self.lastSavedFile = nil
+            UserDefaults.standard.removeObject(forKey: Keys.lastSavedFilePath)
+        }
+        if let exerciseId { queueSensorCleanup(exerciseId: exerciseId) }
+        athleteOSUploadConfirmed = true
+        statusText = "Raw recording verified in AthleteOS. Local phone copy cleaned up."
+    }
+
     func queueSensorCleanup(exerciseId: String) {
         let clean = exerciseId.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
