@@ -6,6 +6,14 @@ struct SavedRecordingFile: Identifiable, Sendable {
     let date: Date
 }
 
+private extension JSONDecoder {
+    static var iso8601: JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }
+}
+
 actor RecordingStore {
     func list() throws -> [SavedRecordingFile] {
         guard let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
@@ -19,6 +27,18 @@ actor RecordingStore {
                 let values = try url.resourceValues(forKeys: [.creationDateKey])
                 return SavedRecordingFile(url: url, date: values.creationDate ?? .distantPast)
             }.sorted { $0.date > $1.date }
+    }
+
+    func delete(_ url: URL) throws {
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        try FileManager.default.removeItem(at: url)
+    }
+
+    func exerciseId(for url: URL) throws -> String? {
+        let data = try Data(contentsOf: url)
+        let recording = try JSONDecoder.iso8601.decode(RawH10RRRecording.self, from: data)
+        let value = recording.exerciseId.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
     }
 
     enum StoreError: Error {
