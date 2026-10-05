@@ -31,14 +31,14 @@ struct ContentView: View {
     private var ready: Bool { recorder.h10RecordingFeatureReady && recorder.fileTransferFeatureReady }
     private var uploaded: Bool {
         guard let file = recorder.lastSavedFile else { return false }
-        return recorder.athleteOSUploadConfirmed || uploader.isUploaded(file)
+        return uploader.isUploaded(file)
     }
     private var title: String {
         if recorder.fetchInProgress { return "Saving your recording" }
         if uploader.busy { return uploader.isConnected ? "Uploading your recording" : "Connecting to AthleteOS" }
         if sensorBusy { return "Talking to your H10" }
         if recorder.recordingOngoing { return "Recording on H10" }
-        if recorder.lastSavedFile != nil { return uploaded ? "Recording saved" : "Ready to upload" }
+        if recorder.lastSavedFile != nil { return uploaded ? "Recording archived" : "Recording saved" }
         if recorder.pendingFetchAvailable { return "Recording on your H10" }
         if recorder.connectionState == .connecting { return "Connecting your H10" }
         if recorder.connectionState == .connected && !ready { return recorder.preparationTimedOut ? "Let’s reconnect your H10" : "Preparing your H10" }
@@ -49,7 +49,7 @@ struct ContentView: View {
         if uploader.busy { return uploader.statusText }
         if sensorBusy { return recorder.statusText }
         if recorder.recordingOngoing { return "Your sensor is recording independently. Reconnect when you’re ready to finish." }
-        if recorder.lastSavedFile != nil { return uploaded ? "Your raw recording is on this phone and confirmed in AthleteOS." : "Your file is safe on this phone. Upload it to complete the transfer." }
+        if recorder.lastSavedFile != nil { return uploaded ? "AthleteOS has verified the raw recording." : "Your raw file is safe on this phone and will archive when AthleteOS is connected." }
         if recorder.pendingFetchAvailable { return "Reconnect to check or finish the recording and save it to your phone." }
         if recorder.connectionState == .connected && !ready { return recorder.preparationMessage }
         return ready ? "Your Polar H10 is ready to record RR intervals." : "Wear your H10 with the strap moistened, then connect to begin."
@@ -58,7 +58,8 @@ struct ContentView: View {
         if recorder.fetchInProgress { return "Reading H10…" }
         if uploader.busy { return "Please wait…" }
         if sensorBusy { return "Working…" }
-        if let _ = recorder.lastSavedFile, !uploaded { return uploader.isConnected ? "Upload recording" : "Connect AthleteOS" }
+        // Pending uploads never take over the main control. A saved file must not
+        // prevent the athlete from starting the next recording.
         if recorder.connectionState == .connecting { return "Connecting…" }
         if recorder.connectionState == .disconnected { return recorder.scanning ? "Stop searching" : recorder.deviceId.isEmpty ? "Find my H10" : "Reconnect H10" }
         if !ready { return recorder.preparationTimedOut ? "Reconnect H10" : "Preparing H10…" }
@@ -66,7 +67,7 @@ struct ContentView: View {
         return "Start recording"
     }
     private var actionIcon: String {
-        if recorder.lastSavedFile != nil && !uploaded { return "icloud.and.arrow.up" }
+        if recorder.lastSavedFile != nil && !uploaded && recorder.connectionState != .connected { return "antenna.radiowaves.left.and.right" }
         if recorder.connectionState != .connected { return "antenna.radiowaves.left.and.right" }
         return recorder.recordingOngoing || recorder.pendingFetchAvailable ? "stop.fill" : "play.fill"
     }
@@ -333,9 +334,9 @@ struct ContentView: View {
                         }.disabled(!ready || busy)
                     }
                     if recorder.athleteOSUploadConfirmed {
-                        Button("Delete confirmed sensor copy", role: .destructive) { confirmDelete = true }.disabled(!ready || busy)
+                        Text("\(recorder.pendingSensorCleanupCount) archived H10 recording(s) waiting for automatic cleanup.").font(.footnote)
                     }
-                    Text("The H10 copy stays protected until the file is saved on your phone and AthleteOS confirms the upload.").font(.footnote).foregroundStyle(.secondary)
+                    Text("H10 copies are removed automatically only after AthleteOS verifies the exact raw file. Cleanup retries when the H10 reconnects.").font(.footnote).foregroundStyle(.secondary)
                 }
                 Section("Diagnostics") {
                     Text(recorder.statusText).font(.footnote).textSelection(.enabled)
