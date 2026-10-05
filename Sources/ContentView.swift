@@ -55,16 +55,14 @@ struct ContentView: View {
         return ready ? "Your Polar H10 is ready to record RR intervals." : "Wear your H10 with the strap moistened, then connect to begin."
     }
     private var actionTitle: String {
-        if recorder.fetchInProgress { return "Reading H10…" }
-        if uploader.busy { return "Please wait…" }
+        if recorder.fetchInProgress { return "Ending night…" }
+        if uploader.busy { return "Saving night…" }
         if sensorBusy { return "Working…" }
-        // Pending uploads never take over the main control. A saved file must not
-        // prevent the athlete from starting the next recording.
-        if recorder.connectionState == .connecting { return "Connecting…" }
-        if recorder.connectionState == .disconnected { return recorder.scanning ? "Stop searching" : recorder.deviceId.isEmpty ? "Find my H10" : "Reconnect H10" }
-        if !ready { return recorder.preparationTimedOut ? "Reconnect H10" : "Preparing H10…" }
-        if recorder.recordingOngoing || recorder.pendingFetchAvailable { return "Stop & save recording" }
-        return "Start recording"
+        if recorder.connectionState == .connecting { return recorder.pendingFetchAvailable ? "Connecting to end night…" : "Connecting…" }
+        if recorder.recordingOngoing || recorder.pendingFetchAvailable { return recorder.connectionState == .connected ? "End night" : "End night" }
+        if recorder.connectionState == .disconnected { return recorder.deviceId.isEmpty ? "Set up H10" : "Start night" }
+        if !ready { return recorder.preparationTimedOut ? "Reconnect H10" : "Preparing…" }
+        return "Start night"
     }
     private var actionIcon: String {
         if recorder.lastSavedFile != nil && !uploaded && recorder.connectionState != .connected { return "antenna.radiowaves.left.and.right" }
@@ -253,22 +251,44 @@ struct ContentView: View {
             .fixedSize(horizontal: false, vertical: true).padding(16).frame(maxWidth: .infinity, alignment: .leading).midnightCard()
     }
     private func primaryAction() {
-        if recorder.connectionState == .disconnected {
-            if recorder.scanning { recorder.stopScanning() }
-            else if recorder.deviceId.isEmpty { recorder.startScanning() }
-            else { recorder.connect() }
-        } else if recorder.preparationTimedOut && !ready {
-            Task { await recorder.retryPreparation() }
-        } else if ready {
-            Task {
-                if recorder.recordingOngoing || recorder.pendingFetchAvailable {
-                    await recorder.stopFetchAndSave()
-                    await processPendingUploads()
-                } else {
-                    await recorder.startRRRecordingAndReleasePhone()
-                }
+        // Night mode is deliberately one-button after the initial H10 pairing.
+        // Start: connect/prepare if needed, start H10 RR recording, then release phone.
+        // End: reconnect/prepare if needed, stop, fetch, archive, verify, delete phone
+        // copy and queue H10 cleanup.
+        Task {
+            if recorder.recordingOngoing || recorder.pendingFetchAvailable {
+                guard await ensureH10ReadyForNightAction() else { return }
+                await recorder.stopFetchAndSave()
+                await processPendingUploads()
+            } else {
+                guard await ensureH10ReadyForNightAction() else { return }
+                await recorder.startRRRecordingAndReleasePhone()
             }
         }
+    }
+
+    private func ensureH10ReadyForNightAction() async -> Bool {
+        if recorder.deviceId.isEmpty {
+            recorder.startScanning()
+            return false
+        }
+        if recorder.connectionState == .disconnected {
+            recorder.connect()
+        }
+        // One press owns the connection wait instead of making the athlete tap again.
+        for _ in 0..<200 {
+            if recorder.connectionState == .connected && ready { return true }
+            if recorder.preparationTimedOut { break }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        if recorder.preparationTimedOut {
+            await recorder.retryPreparation()
+            for _ in 0..<200 {
+                if recorder.connectionState == .connected && ready { return true }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+        }
+        return recorder.connectionState == .connected && ready
     }
 
     private func upload(_ file: URL) async {
