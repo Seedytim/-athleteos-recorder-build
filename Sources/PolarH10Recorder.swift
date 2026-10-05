@@ -29,6 +29,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
     @Published private(set) var fileTransferFeatureReady = false
     @Published private(set) var recordingOngoing = false
     @Published private(set) var fetchInProgress = false
+    @Published private(set) var pftpOperationInProgress = false
     @Published private(set) var pendingFetchAvailable = false
     @Published private(set) var athleteOSUploadConfirmed = false
     @Published private(set) var batteryPercent: UInt?
@@ -194,11 +195,18 @@ final class PolarH10Recorder: NSObject, ObservableObject {
     }
 
     func refreshRecordingStatus() async {
+        guard !fetchInProgress, !pftpOperationInProgress else {
+            statusText = "H10 is busy with another file/recording operation."
+            return
+        }
         clearError()
         guard h10RecordingFeatureReady else {
             fail("H10 recording feature is not ready yet.")
             return
         }
+
+        pftpOperationInProgress = true
+        defer { pftpOperationInProgress = false }
 
         do {
             let status = try await api.requestRecordingStatus(deviceId)
@@ -217,11 +225,18 @@ final class PolarH10Recorder: NSObject, ObservableObject {
     }
 
     func startRRRecordingAndReleasePhone() async {
+        guard !fetchInProgress, !pftpOperationInProgress else {
+            statusText = "H10 is busy with another file/recording operation."
+            return
+        }
         clearError()
         guard h10RecordingFeatureReady else {
             fail("H10 recording feature is not ready yet.")
             return
         }
+
+        pftpOperationInProgress = true
+        defer { pftpOperationInProgress = false }
 
         do {
             let existing = try await api.requestRecordingStatus(deviceId)
@@ -279,10 +294,14 @@ final class PolarH10Recorder: NSObject, ObservableObject {
             fail("Reconnect and wait until the H10 recording feature is ready.")
             return
         }
-        guard !fetchInProgress else { return }
+        guard !fetchInProgress, !pftpOperationInProgress else { return }
 
         fetchInProgress = true
-        defer { fetchInProgress = false }
+        pftpOperationInProgress = true
+        defer {
+            fetchInProgress = false
+            pftpOperationInProgress = false
+        }
 
         do {
             let status = try await api.requestRecordingStatus(deviceId)
@@ -321,10 +340,14 @@ final class PolarH10Recorder: NSObject, ObservableObject {
             fail("Reconnect and wait until the H10 recording feature is ready.")
             return
         }
-        guard !fetchInProgress else { return }
+        guard !fetchInProgress, !pftpOperationInProgress else { return }
 
         fetchInProgress = true
-        defer { fetchInProgress = false }
+        pftpOperationInProgress = true
+        defer {
+            fetchInProgress = false
+            pftpOperationInProgress = false
+        }
 
         let stoppedAt = (UserDefaults.standard.object(forKey: Keys.stoppedAt) as? Date) ?? Date()
 
@@ -577,6 +600,10 @@ final class PolarH10Recorder: NSObject, ObservableObject {
     }
 
     func deleteSensorCopy() async {
+        guard !fetchInProgress, !pftpOperationInProgress else {
+            statusText = "H10 is busy with another file/recording operation."
+            return
+        }
         clearError()
         guard lastSavedFile != nil else {
             fail("A verified local save is required before deleting the H10 copy.")
@@ -586,6 +613,9 @@ final class PolarH10Recorder: NSObject, ObservableObject {
             fail("AthleteOS must confirm the upload before the H10 copy can be deleted.")
             return
         }
+
+        pftpOperationInProgress = true
+        defer { pftpOperationInProgress = false }
 
         do {
             var entry = storedExerciseEntry
@@ -729,10 +759,11 @@ extension PolarH10Recorder: PolarBleApiDeviceFeaturesObserver {
                 return
             }
 
-            guard !self.didAutoRefreshCurrentConnection else { return }
-            self.didAutoRefreshCurrentConnection = true
-            self.statusText = "H10 ready."
-            await self.refreshRecordingStatus()
+            // Do not automatically issue requestRecordingStatus here.
+            // Polar recording status and exercise file access share the PFTP request
+            // queue; auto-refresh can overlap a user-initiated fetch and cause the
+            // SDK AtomicList waitTimeout seen on H10 firmware 5.0.0.
+            self.statusText = "H10 ready. Refresh status only when needed."
         }
     }
 }
