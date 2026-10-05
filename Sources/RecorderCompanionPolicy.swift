@@ -1,14 +1,6 @@
 import Foundation
 
-/// The widget never guesses recording state from a cached timeline. The host app
-/// resolves its one-button action from the durable night state when it opens.
 enum RecorderCompanionPolicy {
-    static func isNightAction(_ url: URL) -> Bool {
-        url.scheme?.lowercased() == "athleteos-recorder" &&
-        url.host?.lowercased() == "night-action" &&
-        (url.path.isEmpty || url.path == "/") && url.query == nil && url.fragment == nil
-    }
-
     static func reminderPlan(enabled: Bool, authorized: Bool, eveningEnabled: Bool,
                              morningEnabled: Bool, nightPending: Bool, startedAt: Date?,
                              morningHour: Int, morningMinute: Int, now: Date,
