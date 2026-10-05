@@ -1,4 +1,5 @@
 name: Build AthleteOS Recorder
+# Public build-only workflow; no AthleteOS secrets are used.
 
 on:
   workflow_dispatch:
