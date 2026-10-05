@@ -26,6 +26,9 @@ struct RecorderRegression {
         precondition(saved.rrSamplesRaw == samples, "Raw RR must remain unchanged, including outliers")
         let files = try await store.list()
         precondition(files.contains { $0.url == url }, "Saved files must remain discoverable")
-        print("PASS: verified archive receipts only, SHA must match, raw samples preserved, saved files discoverable")
+        precondition(try await store.exerciseId(for: url) == "fixture", "Saved file must retain its sensor exercise identity")
+        try await store.delete(url)
+        precondition(!FileManager.default.fileExists(atPath: url.path), "Verified local cleanup must remove only the selected file")
+        print("PASS: verified archive receipts only, SHA must match, raw samples preserved, queue files discoverable and independently deletable")
     }
 }
