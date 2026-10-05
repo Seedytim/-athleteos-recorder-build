@@ -24,8 +24,9 @@ expected night.
 
 ## Validation and releases
 
-Automatic validation runs portable safety/connection checks on Linux and real
-uploader transport regression tests plus simulator compilation on macOS.
+Automatic native validation runs all safety/connection checks, real uploader
+transport regressions and simulator compilation on macOS. A separate Linux
+workflow provides portable feedback; its runner queue does not gate native releases.
 Dependencies are pinned and cached. Validation never packages an IPA.
 
 Release remains manually dispatchable. An explicit `[release-recorder]` marker on

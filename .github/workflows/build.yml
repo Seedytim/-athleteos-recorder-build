@@ -11,17 +11,6 @@ concurrency:
 permissions:
   contents: read
 jobs:
-  portable-regressions:
-    runs-on: ubuntu-latest
-    container: swift:6.2-noble
-    timeout-minutes: 6
-    steps:
-      - uses: actions/checkout@v4
-      - name: Portable lifecycle and connection regressions
-        run: |
-          swiftc Sources/NightConnectionPolicy.swift Sources/RecordingModels.swift Sources/RecordingStore.swift Sources/UploadReceipt.swift Tests/RecorderRegression.swift -o /tmp/recorder-regression
-          /tmp/recorder-regression
-          swiftc -frontend -parse Sources/*.swift Tests/RecorderRegression.swift
   validate:
     runs-on: macos-15
     timeout-minutes: 12
