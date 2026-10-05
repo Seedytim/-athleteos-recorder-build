@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import Security
+import CryptoKit
 
 @MainActor
 final class AthleteOSUploader: ObservableObject {
@@ -102,20 +103,24 @@ final class AthleteOSUploader: ObservableObject {
         statusText = "AthleteOS disconnected. Local recordings are unchanged."
     }
 
-    func upload(fileURL: URL) async -> Bool {
-        guard !busy else { return false }
+    func upload(fileURL: URL) async -> VerifiedArchiveReceipt? {
+        guard !busy else { return nil }
         lastError = nil
         guard let token = readToken() else {
             isConnected = false
-            statusText = "Connect AthleteOS before deleting the H10 sensor copy."
-            return false
+            statusText = "Connect AthleteOS to archive pending recordings."
+            return nil
         }
 
         busy = true
-        statusText = "Uploading raw RR recording to AthleteOS…"
+        statusText = "Archiving raw RR recording in AthleteOS…"
         defer { busy = false }
 
         do {
+            let localData = try Data(contentsOf: fileURL)
+            let digest = SHA256.hash(data: localData)
+            let localSHA = digest.map { String(format: "%02x", $0) }.joined()
+
             var request = URLRequest(url: endpoint, timeoutInterval: 90)
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -136,22 +141,33 @@ final class AthleteOSUploader: ObservableObject {
                 throw UploadError.rejected(status: http.statusCode, detail: responseDetail(responseData))
             }
 
+            guard let receipt = UploadReceipt.verifiedArchive(in: responseData, expectedSHA256: localSHA) else {
+                throw UploadError.rejected(
+                    status: http.statusCode,
+                    detail: "AthleteOS did not verify the exact raw file. The iPhone copy was retained."
+                )
+            }
+
             let json = (try? JSONSerialization.jsonObject(with: responseData)) as? [String: Any]
             let duplicate = json?["duplicate"] as? Bool ?? false
-            guard let confirmedID = UploadReceipt.recordingID(in: responseData) else {
-                throw UploadError.rejected(status: http.statusCode, detail: "AthleteOS has not confirmed a completed recording yet. Please retry.")
-            }
-            lastUploadedRecordingId = confirmedID
+            lastUploadedRecordingId = receipt.recordingID
             rememberUpload(fileURL)
             isConnected = true
-            statusText = duplicate
-                ? "AthleteOS confirmed this RR recording was already stored."
-                : "AthleteOS received and processed the RR recording."
-            return true
+            switch receipt.processingState {
+            case "insufficient_data":
+                statusText = "Raw recording archived safely. There was not enough usable data for HRV analysis."
+            case "error":
+                statusText = "Raw recording archived safely. HRV analysis can be retried separately."
+            default:
+                statusText = duplicate
+                    ? "AthleteOS verified this raw recording was already archived."
+                    : "Raw recording archived and verified in AthleteOS."
+            }
+            return receipt
         } catch {
-            statusText = "AthleteOS upload failed: \(friendly(error)). Local and H10 copies are retained."
+            statusText = "AthleteOS archive failed: \(friendly(error)). The iPhone copy is retained."
             lastError = statusText
-            return false
+            return nil
         }
     }
 
