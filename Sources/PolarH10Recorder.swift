@@ -26,6 +26,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
     @Published private(set) var connectionState: ConnectionState = .disconnected
     @Published private(set) var bluetoothOn = false
     @Published private(set) var h10RecordingFeatureReady = false
+    @Published private(set) var fileTransferFeatureReady = false
     @Published private(set) var recordingOngoing = false
     @Published private(set) var fetchInProgress = false
     @Published private(set) var pendingFetchAvailable = false
@@ -41,6 +42,8 @@ final class PolarH10Recorder: NSObject, ObservableObject {
     private let store = RecordingStore()
     private var storedExerciseEntry: PolarExerciseEntry?
     private var scanTask: Task<Void, Never>?
+    private var fetchReconnectInProgress = false
+    private var didAutoRefreshCurrentConnection = false
 
     private lazy var api: PolarBleApi = {
         PolarBleApiDefaultImpl.polarImplementation(
@@ -165,6 +168,8 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         stopScanning()
         connectionState = .connecting
         h10RecordingFeatureReady = false
+        fileTransferFeatureReady = false
+        didAutoRefreshCurrentConnection = false
         statusText = "Connecting to H10 \(trimmed)…"
 
         do {
@@ -333,6 +338,9 @@ final class PolarH10Recorder: NSObject, ObservableObject {
     }
 
     private func resetConnectionForStoredFetch() async throws {
+        fetchReconnectInProgress = true
+        defer { fetchReconnectInProgress = false }
+
         statusText = "Resetting H10 connection for stored-file transfer…"
 
         if connectionState != .disconnected {
@@ -358,6 +366,8 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         }
 
         h10RecordingFeatureReady = false
+        fileTransferFeatureReady = false
+        didAutoRefreshCurrentConnection = false
         connectionState = .connecting
         statusText = "Reconnecting H10 for stored-file transfer…"
 
@@ -368,8 +378,12 @@ final class PolarH10Recorder: NSObject, ObservableObject {
             throw error
         }
 
-        for _ in 0..<120 {
-            if connectionState == .connected && h10RecordingFeatureReady {
+        for _ in 0..<150 {
+            if connectionState == .connected && h10RecordingFeatureReady && fileTransferFeatureReady {
+                // Do not launch requestRecordingStatus here. It uses the same PFTP
+                // transport as list/fetch and can collide with the stored-file read.
+                statusText = "H10 file transfer ready. Settling connection…"
+                try await Task.sleep(for: .milliseconds(1200))
                 statusText = "H10 reconnected. Reading stored RR recording…"
                 return
             }
@@ -379,7 +393,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         throw NSError(
             domain: "AthleteOSRecorder",
             code: 1002,
-            userInfo: [NSLocalizedDescriptionKey: "H10 did not become ready after reconnect."]
+            userInfo: [NSLocalizedDescriptionKey: "H10 file-transfer service did not become ready after reconnect."]
         )
     }
 
@@ -445,8 +459,9 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                 } catch {
                     if isOperationNotPermitted106(error), attempt < maxAttempts {
                         let delay = retryDelays[min(attempt - 1, retryDelays.count - 1)]
-                        statusText = "H10 temporarily refused the stored-file read (Polar 106). Retrying in \(delay)s…"
+                        statusText = "H10 refused the stored-file read (Polar 106). Resetting file-transfer connection in \(delay)s…"
                         try await Task.sleep(for: .seconds(delay))
+                        try await resetConnectionForStoredFetch()
                         continue
                     }
                     throw error
@@ -454,8 +469,15 @@ final class PolarH10Recorder: NSObject, ObservableObject {
             } catch {
                 if isOperationNotPermitted106(error), attempt < maxAttempts {
                     let delay = retryDelays[min(attempt - 1, retryDelays.count - 1)]
-                    statusText = "H10 temporarily refused the stored-file operation (Polar 106). Retrying in \(delay)s…"
+                    statusText = "H10 refused the stored-file operation (Polar 106). Resetting file-transfer connection in \(delay)s…"
                     try? await Task.sleep(for: .seconds(delay))
+                    do {
+                        try await resetConnectionForStoredFetch()
+                    } catch {
+                        pendingFetchAvailable = true
+                        fail("PFTP reconnect failed after Polar 106: \(friendlyError(error)). Sensor copy retained.")
+                        return
+                    }
                     continue
                 }
 
@@ -557,6 +579,9 @@ extension PolarH10Recorder: PolarBleApiObserver {
     nonisolated func deviceConnecting(_ identifier: PolarDeviceInfo) {
         Task { @MainActor in
             self.connectionState = .connecting
+            self.h10RecordingFeatureReady = false
+            self.fileTransferFeatureReady = false
+            self.didAutoRefreshCurrentConnection = false
             self.statusText = "Connecting to \(identifier.deviceId)…"
         }
     }
@@ -574,6 +599,8 @@ extension PolarH10Recorder: PolarBleApiObserver {
         Task { @MainActor in
             self.connectionState = .disconnected
             self.h10RecordingFeatureReady = false
+            self.fileTransferFeatureReady = false
+            self.didAutoRefreshCurrentConnection = false
             if self.recordingOngoing {
                 self.statusText = "Phone disconnected; H10 sensor-side recording remains the source of truth."
             } else {
@@ -603,11 +630,32 @@ extension PolarH10Recorder: PolarBleApiPowerStateObserver {
 
 extension PolarH10Recorder: PolarBleApiDeviceFeaturesObserver {
     nonisolated func bleSdkFeatureReady(_ identifier: String, feature: PolarBleSdkFeature) {
-        guard feature == .feature_polar_h10_exercise_recording else { return }
-
         Task { @MainActor in
-            self.h10RecordingFeatureReady = true
-            self.statusText = "H10 recording feature ready."
+            switch feature {
+            case .feature_polar_h10_exercise_recording:
+                self.h10RecordingFeatureReady = true
+            case .feature_polar_file_transfer:
+                self.fileTransferFeatureReady = true
+            default:
+                return
+            }
+
+            guard
+                self.connectionState == .connected,
+                self.h10RecordingFeatureReady,
+                self.fileTransferFeatureReady
+            else {
+                return
+            }
+
+            if self.fetchReconnectInProgress {
+                self.statusText = "H10 recording and file-transfer services ready."
+                return
+            }
+
+            guard !self.didAutoRefreshCurrentConnection else { return }
+            self.didAutoRefreshCurrentConnection = true
+            self.statusText = "H10 ready."
             await self.refreshRecordingStatus()
         }
     }
