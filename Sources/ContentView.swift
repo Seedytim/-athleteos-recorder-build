@@ -12,6 +12,7 @@ struct ContentView: View {
     @EnvironmentObject private var uploader: AthleteOSUploader
     @EnvironmentObject private var notifications: RecorderNotifications
     @State private var actionGate = NightActionGate()
+    @State private var nightActionWasEnd = false
     @State private var pendingWidgetAction = false
     @State private var showSettings = false
     @State private var showRecordings = false
@@ -60,6 +61,7 @@ struct ContentView: View {
         return ready ? "Your Polar H10 is ready to record RR intervals." : "Wear your H10 with the strap moistened, then connect to begin."
     }
     private var actionTitle: String {
+        if actionGate.running { return nightActionWasEnd ? "Ending night…" : "Starting night…" }
         if recorder.fetchInProgress { return "Ending night…" }
         if sensorBusy { return recorder.pendingFetchAvailable ? "Ending night…" : "Starting night…" }
         if recorder.connectionState == .connecting { return recorder.pendingFetchAvailable ? "Connecting to end night…" : "Connecting…" }
@@ -291,6 +293,7 @@ struct ContentView: View {
 
     private func primaryAction() {
         guard actionGate.begin() else { return }
+        nightActionWasEnd = recorder.recordingOngoing || recorder.pendingFetchAvailable
         Task {
             defer { actionGate.finish() }
             await notifications.refreshAuthorization()

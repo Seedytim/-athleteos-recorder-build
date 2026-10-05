@@ -9,6 +9,17 @@ enum RecorderCompanionPolicy {
         (url.path.isEmpty || url.path == "/") && url.query == nil && url.fragment == nil
     }
 
+    static func reminderPlan(enabled: Bool, authorized: Bool, eveningEnabled: Bool,
+                             morningEnabled: Bool, nightPending: Bool, startedAt: Date?,
+                             morningHour: Int, morningMinute: Int, now: Date,
+                             calendar: Calendar = .current) -> (evening: Bool, morning: Date?) {
+        guard enabled && authorized else { return (false, nil) }
+        let morning = morningEnabled && nightPending ? startedAt.flatMap {
+            morningReminder(startedAt: $0, hour: morningHour, minute: morningMinute, now: now, calendar: calendar)
+        } : nil
+        return (eveningEnabled && !nightPending, morning)
+    }
+
     static func morningReminder(startedAt: Date, hour: Int, minute: Int,
                                 now: Date, calendar: Calendar = .current) -> Date? {
         guard (0...23).contains(hour), (0...59).contains(minute),

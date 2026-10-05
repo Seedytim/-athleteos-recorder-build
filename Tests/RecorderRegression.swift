@@ -66,6 +66,19 @@ struct RecorderRegression {
         precondition(RecorderCompanionPolicy.morningReminder(startedAt: start, hour: 7, minute: 15, now: date(27, 8), calendar: calendar) == nil, "Restart must not reschedule an old night for tomorrow")
         precondition(RecorderCompanionPolicy.morningReminder(startedAt: start, hour: 24, minute: 0, now: start, calendar: calendar) == nil)
         precondition(RecorderCompanionPolicy.morningReminder(startedAt: date(27, 1), hour: 7, minute: 15, now: date(27, 1), calendar: calendar) == date(27, 7, 15), "Post-midnight start uses this morning")
+        func plan(enabled: Bool = true, authorized: Bool = true, pending: Bool,
+                  morningEnabled: Bool = true) -> (evening: Bool, morning: Date?) {
+            RecorderCompanionPolicy.reminderPlan(enabled: enabled, authorized: authorized,
+                eveningEnabled: true, morningEnabled: morningEnabled, nightPending: pending,
+                startedAt: start, morningHour: 7, morningMinute: 15, now: start, calendar: calendar)
+        }
+        precondition(plan(pending: false).evening && plan(pending: false).morning == nil,
+                     "Durable save restores evening prompt and cancels morning collection prompt")
+        precondition(!plan(pending: true).evening && plan(pending: true).morning == morning,
+                     "A pending night replaces start reminders with its one-off collection prompt")
+        precondition(!plan(enabled: false, pending: false).evening && plan(enabled: false, pending: true).morning == nil)
+        precondition(!plan(authorized: false, pending: false).evening && plan(authorized: false, pending: true).morning == nil)
+        precondition(plan(pending: true, morningEnabled: false).morning == nil)
         print("PASS: strict widget routing, whole-operation duplicate guard, morning reminders across restart and daylight saving")
     }
 

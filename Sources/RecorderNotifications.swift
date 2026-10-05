@@ -50,8 +50,16 @@ final class RecorderNotifications: NSObject, ObservableObject, UNUserNotificatio
     }
 
     func syncNight(pending: Bool, startedAt: Date?) {
-        if pending && !nightPending { nightStartedAt = startedAt ?? Date() }
-        if !pending { nightStartedAt = nil }
+        if pending && !nightPending {
+            // Legacy/recovered sensor nights may not have a start timestamp. Keep
+            // their first reminder anchor across launches instead of moving it.
+            nightStartedAt = startedAt ?? defaults.object(forKey: "notifications.pendingAnchor") as? Date ?? Date()
+            defaults.set(nightStartedAt, forKey: "notifications.pendingAnchor")
+        }
+        if !pending {
+            nightStartedAt = nil
+            defaults.removeObject(forKey: "notifications.pendingAnchor")
+        }
         nightPending = pending
         requestReschedule()
     }
@@ -89,23 +97,23 @@ final class RecorderNotifications: NSObject, ObservableObject, UNUserNotificatio
 
     private func replaceReminders() async {
         center.removePendingNotificationRequests(withIdentifiers: Self.reminderIDs)
-        guard allowed else { return }
+        let morning = Calendar.current.dateComponents([.hour, .minute], from: morningTime)
+        let plan = RecorderCompanionPolicy.reminderPlan(enabled: enabled, authorized: allowed,
+            eveningEnabled: eveningEnabled, morningEnabled: morningEnabled, nightPending: nightPending,
+            startedAt: nightStartedAt, morningHour: morning.hour ?? 7, morningMinute: morning.minute ?? 0,
+            now: Date())
         do {
-            if eveningEnabled && !nightPending {
+            if plan.evening {
                 let c = Calendar.current.dateComponents([.hour, .minute], from: eveningTime)
                 try await center.add(UNNotificationRequest(identifier: "recorder.evening",
                     content: content("Ready for tonight?", "Put on your H10 and open Recorder to start your night."),
                     trigger: UNCalendarNotificationTrigger(dateMatching: c, repeats: true)))
             }
-            if morningEnabled, nightPending, let start = nightStartedAt {
-                let c = Calendar.current.dateComponents([.hour, .minute], from: morningTime)
-                if let date = RecorderCompanionPolicy.morningReminder(startedAt: start,
-                    hour: c.hour ?? 7, minute: c.minute ?? 0, now: Date()) {
-                    let components = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute], from: date)
-                    try await center.add(UNNotificationRequest(identifier: "recorder.morning",
-                        content: content("Bring your night into AthleteOS", "Open Recorder and tap End night to save and archive your H10 recording."),
-                        trigger: UNCalendarNotificationTrigger(dateMatching: components, repeats: false)))
-                }
+            if let date = plan.morning {
+                let components = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute], from: date)
+                try await center.add(UNNotificationRequest(identifier: "recorder.morning",
+                    content: content("Bring your night into AthleteOS", "Open Recorder and tap End night to save and archive your H10 recording."),
+                    trigger: UNCalendarNotificationTrigger(dateMatching: components, repeats: false)))
             }
         } catch { self.error = "Could not schedule reminders: \(error.localizedDescription)" }
     }
