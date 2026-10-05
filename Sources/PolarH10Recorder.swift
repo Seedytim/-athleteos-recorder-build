@@ -398,97 +398,173 @@ final class PolarH10Recorder: NSObject, ObservableObject {
     }
 
     private func fetchAndSaveStoredRecording(stoppedAt: Date) async {
-        let maxAttempts = 8
-        let retryDelays: [UInt64] = [1, 2, 3, 5, 8, 10, 12]
+        let maxAttempts = 5
+        let retryDelays: [UInt64] = [1, 2, 4, 7]
 
         for attempt in 1...maxAttempts {
             do {
-                statusText = attempt == 1
-                    ? "Reading stored RR recording from H10…"
-                    : "Retrying H10 stored-record read (\(attempt)/\(maxAttempts))…"
+                let expectedId = currentExerciseId ?? UserDefaults.standard.string(forKey: Keys.exerciseId)
 
-                var entries: [PolarExerciseEntry] = []
-                for try await entry in api.listExercises(deviceId) {
-                    entries.append(entry)
+                if let expectedId, !expectedId.isEmpty {
+                    // For H10 recordings the exercise identifier becomes the directory name.
+                    // Avoid listExercises() here: it recursively walks the entire H10 filesystem
+                    // and can stall indefinitely on some firmware/PFTP states.
+                    let directEntry: PolarExerciseEntry = (
+                        path: "/\(expectedId)/SAMPLES.BPB",
+                        date: stoppedAt,
+                        entryId: expectedId
+                    )
+                    storedExerciseEntry = directEntry
+                    storedExerciseId = expectedId
+                    statusText = attempt == 1
+                        ? "Reading saved RR file directly from H10…"
+                        : "Retrying direct H10 RR read (\(attempt)/\(maxAttempts))…"
+
+                    do {
+                        let exercise = try await api.fetchExercise(deviceId, entry: directEntry)
+                        try await persistFetchedExercise(exercise, entry: directEntry, stoppedAt: stoppedAt)
+                        return
+                    } catch {
+                        if isOperationNotPermitted106(error), attempt < maxAttempts {
+                            let delay = retryDelays[min(attempt - 1, retryDelays.count - 1)]
+                            statusText = "H10 refused the direct RR read (Polar 106). Resetting connection in \(delay)s…"
+                            try await Task.sleep(for: .seconds(delay))
+                            try await resetConnectionForStoredFetch()
+                            continue
+                        }
+
+                        // A direct path miss or other read failure may mean this recording came
+                        // from an older naming scheme. Fall through to one bounded directory scan.
+                        statusText = "Direct H10 read did not complete. Trying a bounded file lookup…"
+                    }
                 }
 
-                if entries.isEmpty {
-                    if attempt < maxAttempts {
-                        let delay = retryDelays[min(attempt - 1, retryDelays.count - 1)]
-                        statusText = "H10 has not exposed the stored file yet. Retrying in \(delay)s…"
-                        try await Task.sleep(for: .seconds(delay))
-                        continue
-                    }
-                    pendingFetchAvailable = true
-                    fail("The H10 still reports no stored exercise. Sensor copy has not been deleted.")
-                    return
+                let entries = try await listExercisesWithTimeout(seconds: 12)
+                guard !entries.isEmpty else {
+                    throw NSError(
+                        domain: "AthleteOSRecorder",
+                        code: 1003,
+                        userInfo: [NSLocalizedDescriptionKey: "No stored H10 exercise was found."]
+                    )
                 }
 
                 let expectedId = currentExerciseId ?? UserDefaults.standard.string(forKey: Keys.exerciseId)
                 let entry = entries.first(where: { $0.entryId == expectedId }) ?? entries.last!
                 storedExerciseEntry = entry
                 storedExerciseId = entry.entryId
+                statusText = "Stored RR file found. Reading H10…"
 
-                do {
-                    let exercise = try await api.fetchExercise(deviceId, entry: entry)
-                    let startedAt = UserDefaults.standard.object(forKey: Keys.startedAt) as? Date
-                    let fetchedAt = Date()
-
-                    let raw = RawH10RRRecording(
-                        deviceId: deviceId,
-                        exerciseId: entry.entryId,
-                        startedAt: startedAt,
-                        stoppedAt: stoppedAt,
-                        fetchedAt: fetchedAt,
-                        polarSdkVersion: PolarBleApiDefaultImpl.versionInfo(),
-                        firmwareVersion: firmwareVersion,
-                        batteryPercentAtFetch: batteryPercent,
-                        recordingIntervalSeconds: exercise.interval,
-                        rrSamplesRaw: exercise.samples
-                    )
-
-                    let file = try await store.save(raw)
-                    lastSavedFile = file
-                    UserDefaults.standard.set(file.path, forKey: Keys.lastSavedFilePath)
-                    athleteOSUploadConfirmed = false
-                    UserDefaults.standard.removeObject(forKey: Keys.uploadedExerciseId)
-                    pendingFetchAvailable = false
-                    clearError()
-                    statusText = "Saved \(exercise.samples.count) raw RR samples. Sensor copy retained."
-                    return
-                } catch {
-                    if isOperationNotPermitted106(error), attempt < maxAttempts {
-                        let delay = retryDelays[min(attempt - 1, retryDelays.count - 1)]
-                        statusText = "H10 refused the stored-file read (Polar 106). Resetting file-transfer connection in \(delay)s…"
-                        try await Task.sleep(for: .seconds(delay))
-                        try await resetConnectionForStoredFetch()
-                        continue
-                    }
-                    throw error
-                }
+                let exercise = try await fetchExerciseWithTimeout(entry, seconds: 15)
+                try await persistFetchedExercise(exercise, entry: entry, stoppedAt: stoppedAt)
+                return
             } catch {
-                if isOperationNotPermitted106(error), attempt < maxAttempts {
+                if attempt < maxAttempts {
                     let delay = retryDelays[min(attempt - 1, retryDelays.count - 1)]
-                    statusText = "H10 refused the stored-file operation (Polar 106). Resetting file-transfer connection in \(delay)s…"
+                    statusText = "H10 file read did not finish. Resetting connection in \(delay)s…"
                     try? await Task.sleep(for: .seconds(delay))
                     do {
                         try await resetConnectionForStoredFetch()
                     } catch {
                         pendingFetchAvailable = true
-                        fail("PFTP reconnect failed after Polar 106: \(friendlyError(error)). Sensor copy retained.")
+                        fail("H10 reconnect failed: \(friendlyError(error)). Sensor copy retained.")
                         return
                     }
                     continue
                 }
 
                 pendingFetchAvailable = true
-                fail("Fetch failed: \(friendlyError(error)). Sensor copy retained; you can Retry Fetch.")
+                fail("Fetch failed after \(maxAttempts) clean reconnects: \(friendlyError(error)). Sensor copy retained.")
                 return
             }
         }
+    }
 
-        pendingFetchAvailable = true
-        fail("H10 kept returning Polar error 106 after \(maxAttempts) attempts. Sensor copy retained; wait a minute and Retry Fetch.")
+    private func persistFetchedExercise(
+        _ exercise: PolarExerciseData,
+        entry: PolarExerciseEntry,
+        stoppedAt: Date
+    ) async throws {
+        let startedAt = UserDefaults.standard.object(forKey: Keys.startedAt) as? Date
+        let fetchedAt = Date()
+
+        let raw = RawH10RRRecording(
+            deviceId: deviceId,
+            exerciseId: entry.entryId,
+            startedAt: startedAt,
+            stoppedAt: stoppedAt,
+            fetchedAt: fetchedAt,
+            polarSdkVersion: PolarBleApiDefaultImpl.versionInfo(),
+            firmwareVersion: firmwareVersion,
+            batteryPercentAtFetch: batteryPercent,
+            recordingIntervalSeconds: exercise.interval,
+            rrSamplesRaw: exercise.samples
+        )
+
+        let file = try await store.save(raw)
+        lastSavedFile = file
+        UserDefaults.standard.set(file.path, forKey: Keys.lastSavedFilePath)
+        athleteOSUploadConfirmed = false
+        UserDefaults.standard.removeObject(forKey: Keys.uploadedExerciseId)
+        pendingFetchAvailable = false
+        clearError()
+        statusText = "Saved \(exercise.samples.count) raw RR samples. Sensor copy retained."
+    }
+
+    private func listExercisesWithTimeout(seconds: UInt64) async throws -> [PolarExerciseEntry] {
+        try await withThrowingTaskGroup(of: [PolarExerciseEntry].self) { group in
+            group.addTask { [api, deviceId] in
+                var entries: [PolarExerciseEntry] = []
+                for try await entry in api.listExercises(deviceId) {
+                    entries.append(entry)
+                }
+                return entries
+            }
+            group.addTask {
+                try await Task.sleep(for: .seconds(seconds))
+                throw NSError(
+                    domain: "AthleteOSRecorder",
+                    code: 1004,
+                    userInfo: [NSLocalizedDescriptionKey: "H10 file listing timed out."]
+                )
+            }
+            defer { group.cancelAll() }
+            guard let result = try await group.next() else {
+                throw NSError(
+                    domain: "AthleteOSRecorder",
+                    code: 1005,
+                    userInfo: [NSLocalizedDescriptionKey: "H10 file listing ended unexpectedly."]
+                )
+            }
+            return result
+        }
+    }
+
+    private func fetchExerciseWithTimeout(
+        _ entry: PolarExerciseEntry,
+        seconds: UInt64
+    ) async throws -> PolarExerciseData {
+        try await withThrowingTaskGroup(of: PolarExerciseData.self) { group in
+            group.addTask { [api, deviceId] in
+                try await api.fetchExercise(deviceId, entry: entry)
+            }
+            group.addTask {
+                try await Task.sleep(for: .seconds(seconds))
+                throw NSError(
+                    domain: "AthleteOSRecorder",
+                    code: 1006,
+                    userInfo: [NSLocalizedDescriptionKey: "H10 RR file read timed out."]
+                )
+            }
+            defer { group.cancelAll() }
+            guard let result = try await group.next() else {
+                throw NSError(
+                    domain: "AthleteOSRecorder",
+                    code: 1007,
+                    userInfo: [NSLocalizedDescriptionKey: "H10 RR file read ended unexpectedly."]
+                )
+            }
+            return result
+        }
     }
 
     func markAthleteOSUploadConfirmed(for file: URL) {
