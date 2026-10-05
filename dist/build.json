@@ -1,6 +1,7 @@
 {
-  "version": "2.0.1",
-  "build": "13",
-  "size": 3727433,
-  "sha256": "a8b9232f2e2275a5e7443a1622b9e3006898d1a3b36d249b3dcf5dec7c57e31d"
+  "version": "2.0.2",
+  "build": "14",
+  "size": 3814321,
+  "sha256": "ef537e2d5a863609311bff9b0d2464f6e1df0df216d34718657822c5fd643984",
+  "source_commit": "8b829b2d9fef3d54011a3dd8bdcbacb6ea3f593b"
 }
