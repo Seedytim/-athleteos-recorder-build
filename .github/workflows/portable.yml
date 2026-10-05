@@ -2,9 +2,9 @@ name: Portable Recorder Safety
 on:
   push:
     branches: [main]
-    paths: ["Sources/**","Widget/**","Tests/**",".github/workflows/portable.yml"]
+    paths: ["Sources/**""Tests/**",".github/workflows/portable.yml"]
   pull_request:
-    paths: ["Sources/**","Widget/**","Tests/**"]
+    paths: ["Sources/**""Tests/**"]
 concurrency:
   group: recorder-portable-${{ github.ref }}
   cancel-in-progress: true
