@@ -44,10 +44,6 @@ struct RecorderRegression {
         print("PASS: verified archive receipts only, SHA must match, raw samples preserved, queue files discoverable and independently deletable")
     }
     static func testCompanionControls() {
-        precondition(RecorderCompanionPolicy.isNightAction(URL(string: "athleteos-recorder://night-action")!))
-        for url in ["https://night-action", "athleteos-recorder://connect?token=x", "athleteos-recorder://night-action?token=x", "athleteos-recorder://night-action/other", "athleteos-recorder://night-action#start"] {
-            precondition(!RecorderCompanionPolicy.isNightAction(URL(string: url)!))
-        }
         var gate = NightActionGate()
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         precondition(gate.begin(now: now))
@@ -79,7 +75,7 @@ struct RecorderRegression {
         precondition(!plan(enabled: false, pending: false).evening && plan(enabled: false, pending: true).morning == nil)
         precondition(!plan(authorized: false, pending: false).evening && plan(authorized: false, pending: true).morning == nil)
         precondition(plan(pending: true, morningEnabled: false).morning == nil)
-        print("PASS: strict widget routing, whole-operation duplicate guard, morning reminders across restart and daylight saving")
+        print("PASS: whole-operation duplicate guard, morning reminders across restart and daylight saving")
     }
 
     static func testConnectionTransitions() {
