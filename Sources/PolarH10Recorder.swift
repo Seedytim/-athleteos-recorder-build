@@ -27,6 +27,8 @@ final class PolarH10Recorder: NSObject, ObservableObject {
     @Published private(set) var bluetoothOn = false
     @Published private(set) var h10RecordingFeatureReady = false
     @Published private(set) var fileTransferFeatureReady = false
+    @Published private(set) var preparationTimedOut = false
+    @Published private(set) var recoveringConnection = false
     @Published private(set) var recordingOngoing = false
     @Published private(set) var fetchInProgress = false
     @Published private(set) var pftpOperationInProgress = false
@@ -43,6 +45,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
     private let store = RecordingStore()
     private var storedExerciseEntry: PolarExerciseEntry?
     private var scanTask: Task<Void, Never>?
+    private var preparationTask: Task<Void, Never>?
     private var fetchReconnectInProgress = false
     private var didAutoRefreshCurrentConnection = false
 
@@ -108,6 +111,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
     }
 
     deinit {
+        preparationTask?.cancel()
         scanTask?.cancel()
     }
 
@@ -177,6 +181,8 @@ final class PolarH10Recorder: NSObject, ObservableObject {
     }
 
     func connect() {
+        preparationTask?.cancel()
+        preparationTimedOut = false
         clearError()
         let trimmed = deviceId.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
@@ -200,6 +206,8 @@ final class PolarH10Recorder: NSObject, ObservableObject {
     }
 
     func disconnect() {
+        preparationTask?.cancel()
+        preparationTimedOut = false
         clearError()
         guard !deviceId.isEmpty else { return }
         do {
@@ -209,6 +217,53 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                 : "Disconnected."
         } catch {
             fail("Disconnect failed: \(error.localizedDescription)")
+        }
+    }
+
+    var preparationMessage: String {
+        if h10RecordingFeatureReady && fileTransferFeatureReady { return "H10 services are ready." }
+        let service = !h10RecordingFeatureReady ? "recording service" : "file-transfer service"
+        return preparationTimedOut
+            ? "The H10 connected, but its \(service) did not become ready. Reconnect to try again."
+            : "Connected. Waiting for the H10 \(service)…"
+    }
+
+    private func watchPreparation() {
+        preparationTask?.cancel()
+        preparationTimedOut = false
+        guard !fetchReconnectInProgress else { return }
+        preparationTask = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: 15_000_000_000) } catch { return }
+            guard let self, self.connectionState == .connected,
+                  !self.h10RecordingFeatureReady || !self.fileTransferFeatureReady,
+                  !self.fetchInProgress, !self.pftpOperationInProgress else { return }
+            self.preparationTimedOut = true
+            self.statusText = self.preparationMessage
+        }
+    }
+
+    func retryPreparation() async {
+        guard !recoveringConnection, !fetchInProgress, !pftpOperationInProgress else { return }
+        recoveringConnection = true
+        defer { recoveringConnection = false }
+        preparationTask?.cancel()
+        preparationTimedOut = false
+        clearError()
+        do {
+            try api.disconnectFromDevice(deviceId)
+            for _ in 0..<60 {
+                if connectionState == .disconnected { break }
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+            guard connectionState == .disconnected else {
+                preparationTimedOut = true
+                fail("The H10 did not disconnect. Try Disconnect in Settings, then reconnect.")
+                return
+            }
+            connect()
+        } catch {
+            preparationTimedOut = true
+            fail("Reconnect failed: \(error.localizedDescription)")
         }
     }
 
@@ -724,12 +779,14 @@ extension PolarH10Recorder: PolarBleApiObserver {
             self.stopScanning()
             self.deviceId = identifier.deviceId
             self.connectionState = .connected
-            self.statusText = "Connected. Waiting for H10 recording feature…"
+            self.statusText = self.preparationMessage
+            self.watchPreparation()
         }
     }
 
     nonisolated func deviceDisconnected(_ identifier: PolarDeviceInfo, info: PolarBleDisconnectInfo) {
         Task { @MainActor in
+            self.preparationTask?.cancel()
             self.connectionState = .disconnected
             self.h10RecordingFeatureReady = false
             self.fileTransferFeatureReady = false
@@ -754,8 +811,10 @@ extension PolarH10Recorder: PolarBleApiPowerStateObserver {
         Task { @MainActor in
             self.stopScanning()
             self.bluetoothOn = false
+            self.preparationTask?.cancel()
             self.connectionState = .disconnected
             self.h10RecordingFeatureReady = false
+            self.fileTransferFeatureReady = false
             self.statusText = "Bluetooth is off."
         }
     }
@@ -781,6 +840,8 @@ extension PolarH10Recorder: PolarBleApiDeviceFeaturesObserver {
                 return
             }
 
+            self.preparationTask?.cancel()
+            self.preparationTimedOut = false
             if self.fetchReconnectInProgress {
                 self.statusText = "H10 recording and file-transfer services ready."
                 return

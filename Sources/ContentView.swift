@@ -26,7 +26,7 @@ struct ContentView: View {
     private var latestFile: URL? { recorder.lastSavedFile ?? savedFiles.first?.url }
     private var latestUploaded: Bool { latestFile.map { uploader.isUploaded($0) } ?? false }
 
-    private var sensorBusy: Bool { recorder.fetchInProgress || recorder.pftpOperationInProgress }
+    private var sensorBusy: Bool { recorder.fetchInProgress || recorder.pftpOperationInProgress || recorder.recoveringConnection }
     private var busy: Bool { sensorBusy || uploader.busy }
     private var ready: Bool { recorder.h10RecordingFeatureReady && recorder.fileTransferFeatureReady }
     private var uploaded: Bool {
@@ -41,6 +41,7 @@ struct ContentView: View {
         if recorder.lastSavedFile != nil { return uploaded ? "Recording saved" : "Ready to upload" }
         if recorder.pendingFetchAvailable { return "Recording on your H10" }
         if recorder.connectionState == .connecting { return "Connecting your H10" }
+        if recorder.connectionState == .connected && !ready { return recorder.preparationTimedOut ? "Let’s reconnect your H10" : "Preparing your H10" }
         return ready ? "Ready to record" : "Let’s get connected"
     }
     private var subtitle: String {
@@ -50,6 +51,7 @@ struct ContentView: View {
         if recorder.recordingOngoing { return "Your sensor is recording independently. Reconnect when you’re ready to finish." }
         if recorder.lastSavedFile != nil { return uploaded ? "Your raw recording is on this phone and confirmed in AthleteOS." : "Your file is safe on this phone. Upload it to complete the transfer." }
         if recorder.pendingFetchAvailable { return "Reconnect to check or finish the recording and save it to your phone." }
+        if recorder.connectionState == .connected && !ready { return recorder.preparationMessage }
         return ready ? "Your Polar H10 is ready to record RR intervals." : "Wear your H10 with the strap moistened, then connect to begin."
     }
     private var actionTitle: String {
@@ -59,7 +61,7 @@ struct ContentView: View {
         if let _ = recorder.lastSavedFile, !uploaded { return uploader.isConnected ? "Upload recording" : "Connect AthleteOS" }
         if recorder.connectionState == .connecting { return "Connecting…" }
         if recorder.connectionState == .disconnected { return recorder.scanning ? "Stop searching" : recorder.deviceId.isEmpty ? "Find my H10" : "Reconnect H10" }
-        if !ready { return "Preparing H10…" }
+        if !ready { return recorder.preparationTimedOut ? "Reconnect H10" : "Preparing H10…" }
         if recorder.recordingOngoing || recorder.pendingFetchAvailable { return "Stop & save recording" }
         return "Start recording"
     }
@@ -85,7 +87,7 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, minHeight: 60)
                     }
                     .buttonStyle(MidnightPrimaryButton())
-                    .disabled(busy || recorder.connectionState == .connecting || (!recorder.bluetoothOn && recorder.lastSavedFile == nil) || (recorder.connectionState == .connected && !ready && (recorder.lastSavedFile == nil || uploaded)))
+                    .disabled(busy || recorder.connectionState == .connecting || (!recorder.bluetoothOn && recorder.lastSavedFile == nil) || (recorder.connectionState == .connected && !ready && !recorder.preparationTimedOut && (recorder.lastSavedFile == nil || uploaded)))
                     nearbySensors
                     if let error = recorder.lastError { notice(error, icon: "exclamationmark.triangle", color: .orange) }
                     if let error = uploader.lastError { notice(error, icon: "icloud.slash", color: .orange) }
@@ -236,6 +238,8 @@ struct ContentView: View {
             if recorder.scanning { recorder.stopScanning() }
             else if recorder.deviceId.isEmpty { recorder.startScanning() }
             else { recorder.connect() }
+        } else if recorder.preparationTimedOut && !ready {
+            Task { await recorder.retryPreparation() }
         } else if ready {
             Task {
                 if recorder.recordingOngoing || recorder.pendingFetchAvailable {
