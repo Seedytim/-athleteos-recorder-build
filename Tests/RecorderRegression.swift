@@ -3,6 +3,7 @@ import Foundation
 @main
 struct RecorderRegression {
     static func main() async throws {
+        testCompanionControls()
         testConnectionTransitions()
         let id = UUID().uuidString
         let sha = String(repeating: "a", count: 64)
@@ -42,6 +43,32 @@ struct RecorderRegression {
         #endif
         print("PASS: verified archive receipts only, SHA must match, raw samples preserved, queue files discoverable and independently deletable")
     }
+    static func testCompanionControls() {
+        precondition(RecorderCompanionPolicy.isNightAction(URL(string: "athleteos-recorder://night-action")!))
+        for url in ["https://night-action", "athleteos-recorder://connect?token=x", "athleteos-recorder://night-action?token=x", "athleteos-recorder://night-action/other", "athleteos-recorder://night-action#start"] {
+            precondition(!RecorderCompanionPolicy.isNightAction(URL(string: url)!))
+        }
+        var gate = NightActionGate()
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        precondition(gate.begin(now: now))
+        precondition(!gate.begin(now: now.addingTimeInterval(60)), "A second widget tap cannot reverse an in-flight night")
+        gate.finish(now: now.addingTimeInterval(61))
+        precondition(!gate.begin(now: now.addingTimeInterval(62)), "Duplicate URL delivery immediately after completion must be ignored")
+        precondition(gate.begin(now: now.addingTimeInterval(64)))
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Pacific/Auckland")!
+        func date(_ day: Int, _ hour: Int, _ minute: Int = 0) -> Date {
+            calendar.date(from: DateComponents(year: 2026, month: 9, day: day, hour: hour, minute: minute))!
+        }
+        let start = date(26, 21)
+        let morning = RecorderCompanionPolicy.morningReminder(startedAt: start, hour: 7, minute: 15, now: start, calendar: calendar)
+        precondition(morning == date(27, 7, 15), "Reminder uses local morning across NZ daylight-saving transition")
+        precondition(RecorderCompanionPolicy.morningReminder(startedAt: start, hour: 7, minute: 15, now: date(27, 8), calendar: calendar) == nil, "Restart must not reschedule an old night for tomorrow")
+        precondition(RecorderCompanionPolicy.morningReminder(startedAt: start, hour: 24, minute: 0, now: start, calendar: calendar) == nil)
+        precondition(RecorderCompanionPolicy.morningReminder(startedAt: date(27, 1), hour: 7, minute: 15, now: date(27, 1), calendar: calendar) == date(27, 7, 15), "Post-midnight start uses this morning")
+        print("PASS: strict widget routing, whole-operation duplicate guard, morning reminders across restart and daylight saving")
+    }
+
     static func testConnectionTransitions() {
         func step(on: Bool = true, connected: Bool = false, record: Bool = false,
                   transfer: Bool = false, busy: Bool = false, timedOut: Bool = false,

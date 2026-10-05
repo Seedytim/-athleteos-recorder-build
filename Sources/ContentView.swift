@@ -10,6 +10,9 @@ private enum Midnight {
 struct ContentView: View {
     @EnvironmentObject private var recorder: PolarH10Recorder
     @EnvironmentObject private var uploader: AthleteOSUploader
+    @EnvironmentObject private var notifications: RecorderNotifications
+    @State private var actionGate = NightActionGate()
+    @State private var pendingWidgetAction = false
     @State private var showSettings = false
     @State private var showRecordings = false
     @State private var savedFiles: [SavedRecordingFile] = []
@@ -26,7 +29,7 @@ struct ContentView: View {
     private var latestFile: URL? { recorder.lastSavedFile ?? savedFiles.first?.url }
     private var latestUploaded: Bool { latestFile.map { uploader.isUploaded($0) } ?? false }
 
-    private var sensorBusy: Bool { recorder.nightActionInProgress || recorder.fetchInProgress || recorder.pftpOperationInProgress || recorder.recoveringConnection }
+    private var sensorBusy: Bool { actionGate.running || recorder.nightActionInProgress || recorder.fetchInProgress || recorder.pftpOperationInProgress || recorder.recoveringConnection }
     private var busy: Bool { sensorBusy || uploader.busy }
     private var ready: Bool { recorder.h10RecordingFeatureReady && recorder.fileTransferFeatureReady }
     private var uploaded: Bool {
@@ -112,7 +115,21 @@ struct ContentView: View {
             .toolbar(.hidden, for: .navigationBar)
             .sheet(isPresented: $showSettings) { settings }
             .sheet(isPresented: $showRecordings, onDismiss: { Task { await refreshSavedFiles() } }) { recordings }
+            .onOpenURL { url in
+                if RecorderCompanionPolicy.isNightAction(url) {
+                    guard !actionGate.running else { return }
+                    pendingWidgetAction = true
+                    consumeWidgetAction()
+                } else {
+                    Task { _ = await uploader.handleConnectionURL(url) }
+                }
+            }
+            .onChange(of: recorder.pendingFetchAvailable) { _ in syncReminders() }
+            .onChange(of: recorder.recordingOngoing) { _ in syncReminders() }
             .task {
+                syncReminders()
+                await notifications.refreshAuthorization()
+                consumeWidgetAction()
                 // Retry transient network/archive failures while this view is active.
                 while !Task.isCancelled {
                     if scenePhase == .active {
@@ -137,7 +154,10 @@ struct ContentView: View {
             }
             .onChange(of: scenePhase) { phase in
                 if phase == .active {
+                    consumeWidgetAction()
                     Task {
+                        syncReminders()
+                        await notifications.refreshAuthorization()
                         await processPendingUploads()
                         await recorder.cleanupQueuedSensorCopies()
                         await refreshSavedFiles()
@@ -258,10 +278,40 @@ struct ContentView: View {
         Label(text, systemImage: icon).font(.footnote).foregroundStyle(color)
             .fixedSize(horizontal: false, vertical: true).padding(16).frame(maxWidth: .infinity, alignment: .leading).midnightCard()
     }
+    private func syncReminders() {
+        notifications.syncNight(pending: recorder.recordingOngoing || recorder.pendingFetchAvailable,
+            startedAt: UserDefaults.standard.object(forKey: "h10.startedAt") as? Date)
+    }
+
+    private func consumeWidgetAction() {
+        guard pendingWidgetAction, scenePhase == .active else { return }
+        pendingWidgetAction = false
+        primaryAction()
+    }
+
     private func primaryAction() {
+        guard actionGate.begin() else { return }
         Task {
+            defer { actionGate.finish() }
+            await notifications.refreshAuthorization()
+            // CoreBluetooth may still be initializing during a widget cold launch.
+            for _ in 0..<10 where !recorder.bluetoothOn {
+                try? await Task.sleep(for: .milliseconds(200))
+            }
             await recorder.performNightAction()
+            syncReminders()
+            let night = recorder.currentExerciseId ?? "setup"
+            if let error = recorder.lastError {
+                await notifications.event(key: "action-\(night)", title: "Recorder needs your attention", body: error)
+            } else if recorder.recordingOngoing {
+                await notifications.event(key: "started-\(night)", title: "Night recording confirmed",
+                    body: "Your H10 confirmed recording. It can record independently of your phone.")
+            }
             await processPendingUploads()
+            if let file = recorder.lastSavedFile, !uploader.isConnected {
+                await notifications.event(key: "upload-\(file.lastPathComponent)", title: "Recording saved on your iPhone",
+                    body: "Connect AthleteOS in Recorder Settings to archive it. Your raw recording remains safely on your phone.")
+            }
             await recorder.cleanupQueuedSensorCopies()
             await refreshSavedFiles()
         }
@@ -269,14 +319,23 @@ struct ContentView: View {
 
     private func upload(_ file: URL) async {
         let store = RecordingStore.shared
-        guard let receipt = await uploader.upload(fileURL: file) else { return }
+        guard let receipt = await uploader.upload(fileURL: file) else {
+            await notifications.event(key: "upload-\(file.lastPathComponent)", title: "Recording saved on your iPhone",
+                body: "AthleteOS has not verified the archive yet. Your raw file is retained; Recorder will retry while open.")
+            return
+        }
         do {
             let identity = try await store.confirmArchive(file, receipt: receipt)
             recorder.markArchiveConfirmedAndLocalDeleted(for: file, identity: identity)
+            syncReminders()
+            await notifications.event(key: "archived-\(receipt.recordingID)", title: "Night safely archived",
+                body: "AthleteOS verified your raw recording. The iPhone copy has been removed; H10 cleanup runs when connected.")
             await recorder.cleanupQueuedSensorCopies()
             await refreshSavedFiles()
         } catch {
             uploader.reportLocalCleanupError(error)
+            await notifications.event(key: "cleanup-\(file.lastPathComponent)", title: "Recording cleanup will retry",
+                body: "Your recording is retained until archive verification and local cleanup finish safely.")
         }
     }
 
@@ -325,6 +384,34 @@ struct ContentView: View {
                         Button("Disconnect AthleteOS", role: .destructive) { uploader.disconnect() }.disabled(uploader.busy)
                     }
                     Text(uploader.statusText).font(.footnote).foregroundStyle(.secondary)
+                }
+                Section("Notifications") {
+                    if notifications.enabled {
+                        Toggle("Recorder notifications", isOn: $notifications.enabled)
+                    } else {
+                        Button("Enable notifications") { Task { await notifications.enable() } }
+                    }
+                    if notifications.authorization == .denied {
+                        Text("Allow notifications in iPhone Settings to receive reminders and recording alerts.")
+                        Link("Open iPhone Settings", destination: URL(string: UIApplication.openSettingsURLString)!)
+                    }
+                    if notifications.enabled {
+                        Toggle("Evening reminder", isOn: $notifications.eveningEnabled)
+                        if notifications.eveningEnabled {
+                            DatePicker("Start reminder", selection: $notifications.eveningTime, displayedComponents: .hourAndMinute)
+                        }
+                        Toggle("Morning reminder", isOn: $notifications.morningEnabled)
+                        if notifications.morningEnabled {
+                            DatePicker("End reminder", selection: $notifications.morningTime, displayedComponents: .hourAndMinute)
+                        }
+                    }
+                    Text("Morning reminders are scheduled only for a night awaiting collection. Alerts confirm recording and verified archival, or tell you when attention is needed. Reminder times follow your iPhone's local time.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    if let error = notifications.error { Text(error).font(.footnote).foregroundStyle(.orange) }
+                }
+                Section("Home Screen widget") {
+                    Text("Add AthleteOS Recorder → Night recorder from your Home Screen's widget gallery. One tap opens Recorder and runs Start night or End night using the saved night state.")
+                    Text("Keep the widget extension when installing through SideStore.").font(.footnote).foregroundStyle(.secondary)
                 }
                 Section("Sensor storage") {
                     if recorder.pendingFetchAvailable {

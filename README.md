@@ -29,11 +29,31 @@ transport regressions and simulator compilation on macOS. A separate Linux
 workflow provides portable feedback; its runner queue does not gate native releases.
 Dependencies are pinned and cached. Validation never packages an IPA.
 
-Release remains manually dispatchable. An explicit `[release-recorder]` marker on
-a substantive main-branch source commit also requests a release **only after its
-validation succeeds**. Release reruns safety checks, simulator and device builds,
-then publishes `dist/AthleteOSRecorder.ipa` with SHA-256 and source-commit metadata.
-It refuses to publish if main changed during the build.
+Release is manual only and remains on hold until the owner explicitly approves
+publication. Validation never updates the IPA or SideStore feed. A manually
+approved release reruns safety checks, simulator and device builds, then publishes
+the IPA with SHA-256/source metadata. It refuses publication if main changed.
+
+## Widget and notifications
+
+The embedded WidgetKit extension provides small and medium Home Screen widgets.
+Its single control opens the app and runs the same guarded night action. It does
+not cache or guess whether the H10 is recording, and needs no shared App Group or
+Bluetooth connection in the extension. The foreground app owns Bluetooth and raw
+storage. Keep the extension when SideStore signs the eventual approved release.
+
+Enable local notifications in Recorder Settings. Defaults are 21:00 evening and
+07:00 morning, editable in local time. Evening prompts pause while a night awaits
+collection; the one-off morning prompt is cancelled after a durable save. An old
+pending night is not moved forward into another morning on every app launch.
+Verified start/archive and attention alerts are deduplicated across app restarts.
+A notification tap opens Recorder for review; it never implicitly stops a night.
+These are local Recorder notifications, not server-originated AthleteOS/APNs push.
+
+Device acceptance must verify widget availability after SideStore signing, cold
+launch/foreground taps, repeated taps, permission denial/re-enabling, reminders
+with the app closed, and notifications across offline upload/retry and app restart.
+Automated compile cannot prove signing or iOS delivery on the user's phone.
 
 ## Real H10 acceptance test
 

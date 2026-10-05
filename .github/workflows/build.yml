@@ -2,9 +2,9 @@ name: Validate AthleteOS Recorder
 on:
   push:
     branches: [main]
-    paths: ["Sources/**","Tests/**","project.yml",".github/workflows/build.yml",".github/workflows/release.yml"]
+    paths: ["Sources/**","Widget/**","Tests/**","project.yml",".github/workflows/build.yml",".github/workflows/release.yml"]
   pull_request:
-    paths: ["Sources/**","Tests/**","project.yml"]
+    paths: ["Sources/**","Widget/**","Tests/**","project.yml"]
 concurrency:
   group: recorder-validate-${{ github.ref }}
   cancel-in-progress: true
@@ -18,7 +18,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Regression tests
         run: |
-          swiftc Sources/NightConnectionPolicy.swift Sources/RecordingModels.swift Sources/RecordingStore.swift Sources/UploadReceipt.swift Sources/AthleteOSUploader.swift Tests/RecorderRegression.swift -o /tmp/recorder-regression
+          swiftc Sources/RecorderCompanionPolicy.swift Sources/NightConnectionPolicy.swift Sources/RecordingModels.swift Sources/RecordingStore.swift Sources/UploadReceipt.swift Sources/AthleteOSUploader.swift Tests/RecorderRegression.swift -o /tmp/recorder-regression
           /tmp/recorder-regression
       - name: Install XcodeGen
         run: brew install xcodegen

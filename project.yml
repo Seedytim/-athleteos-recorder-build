@@ -38,3 +38,27 @@ targets:
         UILaunchScreen: {}
     dependencies:
       - package: PolarBleSdk
+      - target: RecorderWidget
+        embed: true
+
+  RecorderWidget:
+    type: app-extension
+    platform: iOS
+    sources:
+      - Widget
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: nz.co.athleteos.recorder.widget
+        MARKETING_VERSION: 2.0.2
+        CURRENT_PROJECT_VERSION: 14
+        SWIFT_VERSION: 5.9
+        APPLICATION_EXTENSION_API_ONLY: YES
+        SKIP_INSTALL: YES
+    info:
+      path: Resources/WidgetInfo.plist
+      properties:
+        CFBundleDisplayName: Night recorder
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
