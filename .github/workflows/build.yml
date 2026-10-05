@@ -2,9 +2,9 @@ name: Validate AthleteOS Recorder
 on:
   push:
     branches: [main]
-    paths: ["Sources/**","Widget/**","Tests/**","project.yml",".github/workflows/build.yml",".github/workflows/release.yml"]
+    paths: ["Sources/**""Tests/**","project.yml",".github/workflows/build.yml",".github/workflows/release.yml"]
   pull_request:
-    paths: ["Sources/**","Widget/**","Tests/**","project.yml"]
+    paths: ["Sources/**""Tests/**","project.yml"]
 concurrency:
   group: recorder-validate-${{ github.ref }}
   cancel-in-progress: true
