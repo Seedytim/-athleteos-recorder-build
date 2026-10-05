@@ -21,7 +21,7 @@ struct RecorderRegression {
         precondition(UploadReceipt.verifiedArchive(in: Data("not json".utf8), expectedSHA256: sha) == nil)
         let samples: [UInt32] = [800, 810, 0, 2001, 795]
         let raw = RawH10RRRecording(deviceId: "TEST", exerciseId: "fixture", startedAt: Date(), stoppedAt: Date(), fetchedAt: Date(), polarSdkVersion: "test", firmwareVersion: "test", batteryPercentAtFetch: 80, recordingIntervalSeconds: 1, rrSamplesRaw: samples)
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let store = RecordingStore(root: root, digest: { _ in sha })
         let url = try await store.save(raw)
@@ -31,7 +31,7 @@ struct RecorderRegression {
         let saved = try decoder.decode(RawH10RRRecording.self, from: Data(contentsOf: url))
         precondition(saved.rrSamplesRaw == samples, "Raw RR must remain unchanged, including outliers")
         let files = try await store.list()
-        precondition(files.contains { $0.url == url }, "Saved files must remain discoverable")
+        precondition(files.contains { $0.url.resolvingSymlinksInPath() == url.resolvingSymlinksInPath() }, "Saved files must remain discoverable")
         let savedExerciseId = try await store.exerciseId(for: url)
         precondition(savedExerciseId == "fixture", "Saved file must retain its sensor exercise identity")
         try await store.delete(url)
@@ -68,7 +68,7 @@ struct RecorderRegression {
     }
 
     static func testCleanupJournal(raw: RawH10RRRecording, sha: String, id: String) async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let store = RecordingStore(root: root, digest: { _ in sha })
         let first = try await store.save(raw)
@@ -142,7 +142,7 @@ private final class ArchiveTransport: URLProtocol {
 
 extension RecorderRegression {
     @MainActor static func testUploaderTransport(raw: RawH10RRRecording) async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let store = RecordingStore(root: root)
         let file = try await store.save(raw)
