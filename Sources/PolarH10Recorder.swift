@@ -686,7 +686,6 @@ final class PolarH10Recorder: NSObject, ObservableObject {
             UserDefaults.standard.removeObject(forKey: Keys.lastSavedFilePath)
         }
         if let exerciseId { queueSensorCleanup(exerciseId: exerciseId) }
-        athleteOSUploadConfirmed = true
         statusText = "Raw recording verified in AthleteOS. Local phone copy cleaned up."
     }
 
