@@ -86,7 +86,7 @@ final class AthleteOSUploader: ObservableObject {
             try saveToken(token)
             connectionKeyDraft = ""
             isConnected = true
-            statusText = "Connected to AthleteOS. Saved recordings will upload automatically."
+            statusText = "Connected to AthleteOS. Pending recordings retry while Recorder is open or active."
         } catch {
             statusText = "AthleteOS connection failed: \(friendly(error))"
             lastError = statusText
