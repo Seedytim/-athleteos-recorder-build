@@ -1,12 +1,6 @@
 name: Release AthleteOS Recorder
 on:
   workflow_dispatch:
-  # Explicit opt-in on a substantive source commit; never release every push.
-  # This also works when a GitHub client cannot dispatch workflows directly.
-  workflow_run:
-    workflows: ["Validate AthleteOS Recorder"]
-    types: [completed]
-    branches: [main]
 concurrency:
   group: recorder-release
   cancel-in-progress: false
@@ -14,10 +8,6 @@ permissions:
   contents: write
 jobs:
   release:
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.workflow_run.conclusion == 'success' &&
-       contains(github.event.workflow_run.head_commit.message, '[release-recorder]'))
     runs-on: macos-15
     timeout-minutes: 25
     steps:
