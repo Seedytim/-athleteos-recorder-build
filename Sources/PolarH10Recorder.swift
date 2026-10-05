@@ -39,6 +39,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
     @Published private(set) var currentExerciseId: String?
     @Published private(set) var storedExerciseId: String?
     @Published private(set) var lastSavedFile: URL?
+    @Published private(set) var pendingSensorCleanupCount = 0
     @Published private(set) var statusText = "Tap Find nearby H10s, then choose your sensor."
     @Published private(set) var lastError: String?
 
@@ -70,6 +71,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         static let stoppedAt = "h10.stoppedAt"
         static let lastSavedFilePath = "h10.lastSavedFilePath"
         static let uploadedExerciseId = "h10.uploadedExerciseId"
+        static let pendingSensorCleanupIds = "h10.pendingSensorCleanupIds"
     }
 
     override init() {
@@ -85,6 +87,8 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         }
         self.athleteOSUploadConfirmed =
             savedExerciseId != nil && uploadedExerciseId == savedExerciseId
+        self.pendingSensorCleanupCount =
+            (UserDefaults.standard.stringArray(forKey: Keys.pendingSensorCleanupIds) ?? []).count
         super.init()
 
         #if DEBUG
@@ -674,6 +678,61 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         athleteOSUploadConfirmed = true
         UserDefaults.standard.set(exerciseId, forKey: Keys.uploadedExerciseId)
         statusText = "Saved locally and confirmed in AthleteOS. H10 copy can now be deleted."
+    }
+
+    func queueSensorCleanup(exerciseId: String) {
+        let clean = exerciseId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return }
+        var ids = Set(UserDefaults.standard.stringArray(forKey: Keys.pendingSensorCleanupIds) ?? [])
+        ids.insert(clean)
+        UserDefaults.standard.set(Array(ids).sorted(), forKey: Keys.pendingSensorCleanupIds)
+        pendingSensorCleanupCount = ids.count
+    }
+
+    func cleanupQueuedSensorCopies() async {
+        guard connectionState == .connected,
+              h10RecordingFeatureReady,
+              fileTransferFeatureReady,
+              !fetchInProgress,
+              !pftpOperationInProgress else { return }
+
+        var ids = Set(UserDefaults.standard.stringArray(forKey: Keys.pendingSensorCleanupIds) ?? [])
+        guard !ids.isEmpty else {
+            pendingSensorCleanupCount = 0
+            return
+        }
+
+        pftpOperationInProgress = true
+        defer { pftpOperationInProgress = false }
+        do {
+            let entries = try await listExercisesWithTimeout(seconds: 12)
+            for entry in entries where ids.contains(entry.entryId) {
+                do {
+                    try await api.removeExercise(deviceId, entry: entry)
+                    ids.remove(entry.entryId)
+                    if currentExerciseId == entry.entryId {
+                        currentExerciseId = nil
+                        pendingFetchAvailable = false
+                        UserDefaults.standard.removeObject(forKey: Keys.exerciseId)
+                        UserDefaults.standard.removeObject(forKey: Keys.startedAt)
+                        UserDefaults.standard.removeObject(forKey: Keys.stoppedAt)
+                    }
+                } catch {
+                    // Keep this exercise queued. A cleanup failure must never affect
+                    // the already verified AthleteOS archive or block a new recording.
+                }
+            }
+            UserDefaults.standard.set(Array(ids).sorted(), forKey: Keys.pendingSensorCleanupIds)
+            pendingSensorCleanupCount = ids.count
+            if ids.isEmpty {
+                statusText = "Archived H10 copies cleaned up."
+            } else {
+                statusText = "\(ids.count) archived H10 recording(s) still waiting for sensor cleanup."
+            }
+        } catch {
+            pendingSensorCleanupCount = ids.count
+            statusText = "Archived recordings are safe in AthleteOS. H10 cleanup will retry later."
+        }
     }
 
     func deleteSensorCopy() async {
