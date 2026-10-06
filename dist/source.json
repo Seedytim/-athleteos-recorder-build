@@ -11,12 +11,12 @@
       "iconURL": "https://athleteos-pink-sigma.vercel.app/recorder/icon.png",
       "versions": [
         {
-          "version": "2.1.7",
-          "buildVersion": "24",
-          "date": "2026-10-06T20:08:33Z",
-          "localizedDescription": "Hardens morning RR recovery for persistent Polar SDK error 2/3 by rebuilding the Polar BLE API session, reconnecting from clean SDK state, verifying stored-file access, and trying both the H10 peripheral UUID and Polar device ID before fetch. Delivered through a verified GitHub Release asset.",
-          "downloadURL": "https://github.com/Seedytim/-athleteos-recorder-build/releases/download/recorder-v2.1.7-build24/AthleteOSRecorder.ipa",
-          "size": 4149340,
+          "version": "2.1.8",
+          "buildVersion": "25",
+          "date": "2026-10-06T20:50:49Z",
+          "localizedDescription": "Targets Polar H10 PFTP 106 by forcing and verifying single-BLE-connection mode before Start night and before retained RR fetch, then reasserting single mode after any 106 reconnect. Keeps the H10 sensor copy until AthleteOS verifies upload.",
+          "downloadURL": "https://github.com/Seedytim/-athleteos-recorder-build/releases/download/recorder-v2.1.8-build25/AthleteOSRecorder.ipa",
+          "size": 4152930,
           "minOSVersion": "16.0"
         }
       ]
