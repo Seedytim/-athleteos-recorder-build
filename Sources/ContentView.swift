@@ -41,6 +41,7 @@ struct ContentView: View {
         if recorder.fetchInProgress { return "Saving your recording" }
         if uploader.busy { return uploader.isConnected ? "Uploading your recording" : "Connecting to AthleteOS" }
         if sensorBusy { return "Talking to your H10" }
+        if recorder.stoppedRecordingAwaitingFetch { return "Recording ready to save" }
         if recorder.recordingOngoing { return "Recording on H10" }
         if recorder.lastSavedFile != nil { return uploaded ? "Recording archived" : "Recording saved" }
         if recorder.pendingFetchAvailable { return "Recording on your H10" }
@@ -53,6 +54,7 @@ struct ContentView: View {
         if recorder.fetchInProgress { return "Keep your H10 nearby while the raw recording is saved to your phone." }
         if uploader.busy { return uploader.statusText }
         if sensorBusy { return recorder.statusText }
+        if recorder.stoppedRecordingAwaitingFetch { return "The H10 recording is stopped and retained. Tap End night to retry saving it to your phone." }
         if recorder.recordingOngoing { return "Your sensor is recording independently. Reconnect when you’re ready to finish." }
         if recorder.lastSavedFile != nil { return uploaded ? "AthleteOS has verified the raw recording." : "Your raw file is safe on this phone and will archive when AthleteOS is connected." }
         if recorder.pendingFetchAvailable { return "Reconnect to check or finish the recording and save it to your phone." }
