@@ -344,6 +344,18 @@ struct ContentView: View {
                 if Task.isCancelled || !uploader.isConnected { break }
                 await upload(file.url)
             }
+
+            // Rich ECG/accelerometer/HR capture is an independent raw archive.
+            // Its failure never changes the verified RR cleanup rules above.
+            if uploader.isConnected {
+                let researchStore = ResearchCaptureStore.shared
+                let captures = try await researchStore.pendingArchives()
+                for capture in captures {
+                    if Task.isCancelled || !uploader.isConnected { break }
+                    guard await uploader.uploadResearchCapture(capture) != nil else { break }
+                    try await researchStore.deleteVerifiedArchive(capture)
+                }
+            }
         } catch {
             uploader.reportLocalCleanupError(error)
         }
