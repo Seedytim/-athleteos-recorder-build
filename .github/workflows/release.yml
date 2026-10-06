@@ -56,11 +56,12 @@ jobs:
           test "$VERSION" = "2.1.0"
           test "$BUILD" = "15"
 
-          # Preserve the existing one-tap Home Screen widget.
-          WIDGET="$APP/PlugIns/RecorderWidget.appex"
-          test -d "$WIDGET"
-          APPEX_COUNT=$(find "$APP" -type d -name '*.appex' | wc -l | tr -d ' ')
-          test "$APPEX_COUNT" = "1"
+          # WidgetKit was explicitly removed. No app extension may ship in the Recorder IPA.
+          if find "$APP" -type d -name '*.appex' -print -quit | grep -q .; then
+            echo "Unexpected app extension found in Recorder bundle."
+            find "$APP" -type d -name '*.appex' -print
+            exit 1
+          fi
 
           # The asset catalog and a compiled AppIcon must exist in the actual device build.
           test -s "$APP/Assets.car"
