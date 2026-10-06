@@ -3,7 +3,6 @@ import Foundation
 @main
 struct RecorderRegression {
     static func main() async throws {
-        testCompanionControls()
         testConnectionTransitions()
         let id = UUID().uuidString
         let sha = String(repeating: "a", count: 64)
@@ -38,50 +37,12 @@ struct RecorderRegression {
         try await store.delete(url)
         precondition(!FileManager.default.fileExists(atPath: url.path), "Verified local cleanup must remove only the selected file")
         try await testCleanupJournal(raw: raw, sha: sha, id: id)
+        try await testResearchCaptureStore()
         #if canImport(Combine) && canImport(Security) && canImport(CryptoKit)
         try await testUploaderTransport(raw: raw)
         #endif
         print("PASS: verified archive receipts only, SHA must match, raw samples preserved, queue files discoverable and independently deletable")
     }
-    static func testCompanionControls() {
-        precondition(RecorderCompanionPolicy.isNightAction(URL(string: "athleteos-recorder://night-action")!))
-        for url in ["https://night-action", "athleteos-recorder://connect?token=x", "athleteos-recorder://night-action?token=x", "athleteos-recorder://night-action/other", "athleteos-recorder://night-action#start"] {
-            precondition(!RecorderCompanionPolicy.isNightAction(URL(string: url)!))
-        }
-        var gate = NightActionGate()
-        let now = Date(timeIntervalSince1970: 1_700_000_000)
-        precondition(gate.begin(now: now))
-        precondition(!gate.begin(now: now.addingTimeInterval(60)), "A second widget tap cannot reverse an in-flight night")
-        gate.finish(now: now.addingTimeInterval(61))
-        precondition(!gate.begin(now: now.addingTimeInterval(62)), "Duplicate URL delivery immediately after completion must be ignored")
-        precondition(gate.begin(now: now.addingTimeInterval(64)))
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(identifier: "Pacific/Auckland")!
-        func date(_ day: Int, _ hour: Int, _ minute: Int = 0) -> Date {
-            calendar.date(from: DateComponents(year: 2026, month: 9, day: day, hour: hour, minute: minute))!
-        }
-        let start = date(26, 21)
-        let morning = RecorderCompanionPolicy.morningReminder(startedAt: start, hour: 7, minute: 15, now: start, calendar: calendar)
-        precondition(morning == date(27, 7, 15), "Reminder uses local morning across NZ daylight-saving transition")
-        precondition(RecorderCompanionPolicy.morningReminder(startedAt: start, hour: 7, minute: 15, now: date(27, 8), calendar: calendar) == nil, "Restart must not reschedule an old night for tomorrow")
-        precondition(RecorderCompanionPolicy.morningReminder(startedAt: start, hour: 24, minute: 0, now: start, calendar: calendar) == nil)
-        precondition(RecorderCompanionPolicy.morningReminder(startedAt: date(27, 1), hour: 7, minute: 15, now: date(27, 1), calendar: calendar) == date(27, 7, 15), "Post-midnight start uses this morning")
-        func plan(enabled: Bool = true, authorized: Bool = true, pending: Bool,
-                  morningEnabled: Bool = true) -> (evening: Bool, morning: Date?) {
-            RecorderCompanionPolicy.reminderPlan(enabled: enabled, authorized: authorized,
-                eveningEnabled: true, morningEnabled: morningEnabled, nightPending: pending,
-                startedAt: start, morningHour: 7, morningMinute: 15, now: start, calendar: calendar)
-        }
-        precondition(plan(pending: false).evening && plan(pending: false).morning == nil,
-                     "Durable save restores evening prompt and cancels morning collection prompt")
-        precondition(!plan(pending: true).evening && plan(pending: true).morning == morning,
-                     "A pending night replaces start reminders with its one-off collection prompt")
-        precondition(!plan(enabled: false, pending: false).evening && plan(enabled: false, pending: true).morning == nil)
-        precondition(!plan(authorized: false, pending: false).evening && plan(authorized: false, pending: true).morning == nil)
-        precondition(plan(pending: true, morningEnabled: false).morning == nil)
-        print("PASS: strict widget routing, whole-operation duplicate guard, morning reminders across restart and daylight saving")
-    }
-
     static func testConnectionTransitions() {
         func step(on: Bool = true, connected: Bool = false, record: Bool = false,
                   transfer: Bool = false, busy: Bool = false, timedOut: Bool = false,
@@ -147,6 +108,129 @@ struct RecorderRegression {
         precondition(remaining.count == 1 && remaining[0].identity.exerciseId == "second")
         print("PASS: crash journal, multiple pending nights, SHA mismatch, local deletion failure, device-scoped cleanup retry, independent analysis error")
     }
+
+    static func testResearchCaptureStore() async throws {
+        let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+            .appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let channel = ResearchChannelDescriptor(
+            channel: "ecg",
+            source: "Polar H10 PMD",
+            sampleRateHz: 130,
+            unit: "microvolt",
+            recordEncoding: "little_endian:uint64_timestamp_ns,int32_microvolts",
+            supportedSettings: ["sample_rate_hz": [130]],
+            selectedSettings: ["sample_rate_hz": 130]
+        )
+        let metadata = ResearchDeviceMetadata(
+            deviceId: "TEST-H10",
+            model: "Polar H10",
+            firmwareVersion: "5.0.0",
+            polarSdkVersion: "8.4.0",
+            appVersion: "test",
+            appBuild: "test",
+            internalRRExerciseId: "AOS_TEST",
+            batteryPercentAtStart: 90
+        )
+
+        let store = ResearchCaptureStore(root: root, chunkLimitBytes: 40)
+        let summary = try await store.begin(metadata: metadata, channels: [channel], startedAt: Date(timeIntervalSince1970: 100))
+        let ecgA = [
+            ResearchECGSample(deviceTimestampNs: 10, voltageMicrovolts: -101),
+            ResearchECGSample(deviceTimestampNs: 20, voltageMicrovolts: 202)
+        ]
+        let ecgB = [
+            ResearchECGSample(deviceTimestampNs: 30, voltageMicrovolts: -303),
+            ResearchECGSample(deviceTimestampNs: 40, voltageMicrovolts: 404)
+        ]
+        try await store.appendECG(ecgA)
+        try await store.appendECG(ecgB)
+        try await store.appendACC([
+            ResearchACCSample(deviceTimestampNs: 10, xMilliG: -1, yMilliG: 2, zMilliG: 999)
+        ])
+        try await store.appendHR([
+            ResearchHRSample(
+                receivedAt: Date(timeIntervalSince1970: 101),
+                bpm: 52,
+                rrMs: [1148],
+                rrAvailable: true,
+                contactStatus: true,
+                contactStatusSupported: true
+            )
+        ])
+        try await store.appendEvent(kind: "gap_started", detail: "Bluetooth disconnected during diagnostic test.")
+
+        let captureDir = summary.directory
+        let firstECG = captureDir.appendingPathComponent("ecg-0000.bin")
+        let secondECG = captureDir.appendingPathComponent("ecg-0001.bin")
+        precondition(FileManager.default.fileExists(atPath: firstECG.path))
+        precondition(FileManager.default.fileExists(atPath: secondECG.path), "Chunk limit must rotate raw ECG into another durable file")
+
+        let bytes = try Data(contentsOf: firstECG)
+        precondition(bytes.count == 24, "Two ECG records use exactly 12 bytes each")
+        func u64(_ data: Data, _ offset: Int) -> UInt64 {
+            var value: UInt64 = 0
+            for i in 0..<8 { value |= UInt64(data[offset + i]) << UInt64(i * 8) }
+            return value
+        }
+        func i32(_ data: Data, _ offset: Int) -> Int32 {
+            var value: UInt32 = 0
+            for i in 0..<4 { value |= UInt32(data[offset + i]) << UInt32(i * 8) }
+            return Int32(bitPattern: value)
+        }
+        precondition(u64(bytes, 0) == 10 && i32(bytes, 8) == -101)
+        precondition(u64(bytes, 12) == 20 && i32(bytes, 20) == 202, "Raw signed ECG values and device timestamps must round-trip exactly")
+
+        // Simulate a process dying in the middle of one binary record.
+        let partial = captureDir.appendingPathComponent("acc-0000.bin")
+        let partialHandle = try FileHandle(forWritingTo: partial)
+        try partialHandle.seekToEnd()
+        try partialHandle.write(contentsOf: Data([0xAA, 0xBB, 0xCC]))
+        try partialHandle.close()
+
+        let restarted = ResearchCaptureStore(root: root, chunkLimitBytes: 40)
+        let recoveredCount = try await restarted.recoverInterruptedCaptures(now: Date(timeIntervalSince1970: 200))
+        precondition(recoveredCount == 1, "An app interruption must be discovered without deleting raw chunks")
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let manifest = try decoder.decode(
+            ResearchCaptureManifest.self,
+            from: Data(contentsOf: captureDir.appendingPathComponent("manifest.json"))
+        )
+        precondition(manifest.state == "interrupted")
+        precondition(manifest.rawValuePolicy.contains("preserved unchanged"))
+        precondition(FileManager.default.fileExists(atPath: firstECG.path) && FileManager.default.fileExists(atPath: secondECG.path))
+
+        let events = try String(contentsOf: captureDir.appendingPathComponent("events.ndjson"), encoding: .utf8)
+        precondition(events.contains("gap_started"))
+        precondition(events.contains("recovered_after_interruption"), "Gaps and recovery must be explicit, never silently filled")
+        precondition(events.contains("partial_chunk_repaired"), "A torn binary tail must be repaired and recorded explicitly")
+        let repairedAccSize = (try partial.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? -1
+        precondition(repairedAccSize == 20, "Recovery must truncate only the incomplete ACC tail")
+
+        let second = try await restarted.begin(metadata: metadata, channels: [channel], startedAt: Date(timeIntervalSince1970: 300))
+        try await restarted.appendECG([ResearchECGSample(deviceTimestampNs: 50, voltageMicrovolts: 505)])
+        let finished = try await restarted.finish(state: .completed, batteryPercentAtEnd: 88, endedAt: Date(timeIntervalSince1970: 400))
+        precondition(finished.captureId == second.captureId && finished.totalBytes >= 12)
+
+        let pendingArchives = try await restarted.pendingArchives()
+        precondition(pendingArchives.count == 2, "Interrupted and completed raw stream segments must both remain archiveable")
+        guard let completedArchive = pendingArchives.first(where: { $0.captureId == second.captureId }) else {
+            preconditionFailure("Completed raw stream capture must remain discoverable")
+        }
+        let archiveNames = Set(completedArchive.files.map(\.fileName))
+        precondition(archiveNames.contains("manifest.json") && archiveNames.contains("events.ndjson") && archiveNames.contains("ecg-0000.bin"),
+                     "Archive plan must include provenance and exact raw chunks")
+        try await restarted.deleteVerifiedArchive(completedArchive)
+        let afterVerifiedDelete = try await restarted.pendingArchives()
+        precondition(afterVerifiedDelete.count == 1 && afterVerifiedDelete[0].captureId == summary.captureId,
+                     "Verified cleanup must delete only the selected raw stream capture")
+
+        print("PASS: research raw chunks rotate durably, preserve exact sensor values, expose gaps, recover interruptions, and clean up only after verified archive")
+    }
+
 
 }
 

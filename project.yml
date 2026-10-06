@@ -16,19 +16,27 @@ targets:
     platform: iOS
     sources:
       - Sources
+    resources:
+      - Resources/Assets.xcassets
+    preBuildScripts:
+      - name: Generate App Icons
+        script: |
+          python3 "$SRCROOT/Scripts/generate_app_icons.py"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: nz.co.athleteos.recorder
-        MARKETING_VERSION: 2.0.2
-        CURRENT_PROJECT_VERSION: 14
+        MARKETING_VERSION: 2.1.0
+        CURRENT_PROJECT_VERSION: 15
         SWIFT_VERSION: 5.9
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     info:
       path: Resources/Info.plist
       properties:
         CFBundleDisplayName: AthleteOS Recorder
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
-        NSBluetoothAlwaysUsageDescription: AthleteOS Recorder connects to your Polar H10 to record overnight RR intervals.
+        NSBluetoothAlwaysUsageDescription: AthleteOS Recorder connects to your Polar H10 to preserve raw overnight RR, ECG, heart-rate and accelerometer data.
         CFBundleURLTypes:
           - CFBundleURLName: nz.co.athleteos.recorder
             CFBundleURLSchemes:
@@ -38,27 +46,3 @@ targets:
         UILaunchScreen: {}
     dependencies:
       - package: PolarBleSdk
-      - target: RecorderWidget
-        embed: true
-
-  RecorderWidget:
-    type: app-extension
-    platform: iOS
-    sources:
-      - Widget
-    settings:
-      base:
-        PRODUCT_BUNDLE_IDENTIFIER: nz.co.athleteos.recorder.widget
-        MARKETING_VERSION: 2.0.2
-        CURRENT_PROJECT_VERSION: 14
-        SWIFT_VERSION: 5.9
-        APPLICATION_EXTENSION_API_ONLY: YES
-        SKIP_INSTALL: YES
-    info:
-      path: Resources/WidgetInfo.plist
-      properties:
-        CFBundleDisplayName: Night recorder
-        CFBundleShortVersionString: "$(MARKETING_VERSION)"
-        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
-        NSExtension:
-          NSExtensionPointIdentifier: com.apple.widgetkit-extension

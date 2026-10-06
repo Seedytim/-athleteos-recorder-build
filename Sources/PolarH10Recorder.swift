@@ -28,6 +28,11 @@ final class PolarH10Recorder: NSObject, ObservableObject {
     @Published private(set) var bluetoothOn = false
     @Published private(set) var h10RecordingFeatureReady = false
     @Published private(set) var fileTransferFeatureReady = false
+    @Published private(set) var onlineStreamingFeatureReady = false
+    @Published private(set) var hrFeatureReady = false
+    @Published private(set) var rawStreamActive = false
+    @Published private(set) var rawStreamStatus = "Idle"
+    @Published private(set) var rawCaptureBytes: UInt64 = 0
     @Published private(set) var preparationTimedOut = false
     @Published private(set) var recoveringConnection = false
     @Published private(set) var recordingOngoing = false
@@ -45,7 +50,18 @@ final class PolarH10Recorder: NSObject, ObservableObject {
     @Published private(set) var lastError: String?
 
     private let store = RecordingStore.shared
+    private let researchStore = ResearchCaptureStore.shared
     private var storedExerciseEntry: PolarExerciseEntry?
+    private var ecgStreamTask: Task<Void, Never>?
+    private var accStreamTask: Task<Void, Never>?
+    private var hrStreamTask: Task<Void, Never>?
+    private var researchReconnectTask: Task<Void, Never>?
+    private var ecgStreamRunning = false
+    private var accStreamRunning = false
+    private var hrStreamRunning = false
+    private var lastECGAnchorAt: Date?
+    private var lastACCAnchorAt: Date?
+    private var rawCaptureExpected = false
     private var scanTask: Task<Void, Never>?
     private var preparationTask: Task<Void, Never>?
     private var fetchReconnectInProgress = false
@@ -57,6 +73,8 @@ final class PolarH10Recorder: NSObject, ObservableObject {
             features: [
                 .feature_battery_info,
                 .feature_device_info,
+                .feature_hr,
+                .feature_polar_online_streaming,
                 .feature_polar_device_control,
                 .feature_polar_file_transfer,
                 .feature_polar_h10_exercise_recording
@@ -73,6 +91,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         static let lastSavedFilePath = "h10.lastSavedFilePath"
         static let uploadedExerciseId = "h10.uploadedExerciseId"
         static let pendingSensorCleanupIds = "h10.pendingSensorCleanupIds"
+        static let rawCaptureExpected = "h10.rawCaptureExpected"
     }
 
     override init() {
@@ -90,6 +109,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
             savedExerciseId != nil && uploadedExerciseId == savedExerciseId
         self.pendingSensorCleanupCount =
             (UserDefaults.standard.stringArray(forKey: Keys.pendingSensorCleanupIds) ?? []).count
+        self.rawCaptureExpected = UserDefaults.standard.bool(forKey: Keys.rawCaptureExpected)
         super.init()
 
         #if DEBUG
@@ -98,6 +118,8 @@ final class PolarH10Recorder: NSObject, ObservableObject {
             connectionState = .connected
             h10RecordingFeatureReady = true
             fileTransferFeatureReady = true
+            onlineStreamingFeatureReady = true
+            hrFeatureReady = true
             batteryPercent = 82
             currentExerciseId = nil
             pendingFetchAvailable = false
@@ -113,11 +135,75 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         api.deviceInfoObserver = self
         api.polarFilter(true)
         bluetoothOn = api.isBlePowered
+
+        Task { [researchStore] in
+            _ = try? await researchStore.recoverInterruptedCaptures()
+        }
     }
 
     deinit {
         preparationTask?.cancel()
         scanTask?.cancel()
+        ecgStreamTask?.cancel()
+        accStreamTask?.cancel()
+        hrStreamTask?.cancel()
+        researchReconnectTask?.cancel()
+    }
+
+    func prepareRawCaptureRecovery() async {
+        do {
+            let recovered = try await researchStore.recoverInterruptedCaptures()
+            if recovered > 0 {
+                rawStreamStatus = "Previous high-resolution chunks retained after interruption"
+            }
+        } catch {
+            rawStreamStatus = "Raw recovery warning: \(error.localizedDescription)"
+        }
+
+        guard rawCaptureExpected, let expectedExercise = currentExerciseId, bluetoothOn else { return }
+
+        if connectionState == .disconnected {
+            connect()
+        }
+
+        // A relaunch may occur while the independent H10 RR exercise is still running.
+        // Re-establish that fact before restarting PMD streams; never infer it from
+        // UserDefaults alone.
+        for _ in 0..<150 {
+            if connectionState == .connected && h10RecordingFeatureReady && fileTransferFeatureReady { break }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        guard connectionState == .connected, h10RecordingFeatureReady, fileTransferFeatureReady,
+              !nightActionInProgress, !fetchInProgress, !pftpOperationInProgress else { return }
+
+        pftpOperationInProgress = true
+        defer { pftpOperationInProgress = false }
+
+        do {
+            let status = try await requestStatusWithTimeout()
+            recordingOngoing = status.ongoing
+            guard status.ongoing else {
+                rawCaptureExpected = false
+                UserDefaults.standard.set(false, forKey: Keys.rawCaptureExpected)
+                rawStreamStatus = "Previous raw stream segment retained"
+                return
+            }
+
+            guard status.entryId == expectedExercise else {
+                try? await researchStore.appendEvent(
+                    kind: "recovery_identity_mismatch",
+                    detail: "Expected \(expectedExercise), H10 reported \(status.entryId). No high-resolution stream was restarted."
+                )
+                rawStreamStatus = "RR identity needs review"
+                return
+            }
+
+            pendingFetchAvailable = true
+            let startedAt = UserDefaults.standard.object(forKey: Keys.startedAt) as? Date ?? Date()
+            await startResearchCapture(exerciseId: expectedExercise, startedAt: startedAt)
+        } catch {
+            rawStreamStatus = "RR remains safe · high-resolution recovery failed"
+        }
     }
 
     /// One operation owns connection, service preparation and the sensor transaction.
@@ -286,6 +372,8 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         connectionState = .connecting
         h10RecordingFeatureReady = false
         fileTransferFeatureReady = false
+        onlineStreamingFeatureReady = false
+        hrFeatureReady = false
         didAutoRefreshCurrentConnection = false
         statusText = "Connecting to H10 \(trimmed)…"
 
@@ -302,13 +390,18 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         preparationTimedOut = false
         clearError()
         guard !deviceId.isEmpty else { return }
-        do {
-            try api.disconnectFromDevice(deviceId)
-            statusText = recordingOngoing
-                ? "Phone disconnected. H10 should continue its internal RR recording."
-                : "Disconnected."
-        } catch {
-            fail("Disconnect failed: \(error.localizedDescription)")
+        Task {
+            if rawCaptureExpected || rawStreamActive {
+                await stopResearchCapture(reason: "manual_disconnect")
+            }
+            do {
+                try api.disconnectFromDevice(deviceId)
+                statusText = recordingOngoing
+                    ? "Phone disconnected. H10 internal RR continues safely."
+                    : "Disconnected."
+            } catch {
+                fail("Disconnect failed: \(error.localizedDescription)")
+            }
         }
     }
 
@@ -451,12 +544,13 @@ final class PolarH10Recorder: NSObject, ObservableObject {
             UserDefaults.standard.set(currentExerciseId, forKey: Keys.exerciseId)
             UserDefaults.standard.set(startedAt, forKey: Keys.startedAt)
             UserDefaults.standard.removeObject(forKey: Keys.stoppedAt)
-            statusText = "RR recording confirmed. Disconnecting phone; H10 remains the primary recorder."
+            statusText = "H10 raw RR confirmed. Starting high-resolution raw streams…"
+            await startResearchCapture(exerciseId: exerciseId, startedAt: startedAt)
 
-            do {
-                try api.disconnectFromDevice(deviceId)
-            } catch {
-                statusText = "RR recording confirmed. Automatic phone disconnect failed; recording should still be active."
+            if rawStreamActive {
+                statusText = "Recording raw RR + ECG + accelerometer."
+            } else {
+                statusText = "H10 raw RR is safe. High-resolution stream is unavailable; the safety recording continues."
             }
         } catch {
             fail("Start RR recording failed: \(error.localizedDescription)")
@@ -470,6 +564,8 @@ final class PolarH10Recorder: NSObject, ObservableObject {
             return
         }
         guard !fetchInProgress, !pftpOperationInProgress else { return }
+
+        await stopResearchCapture(reason: "end_recording")
 
         fetchInProgress = true
         pftpOperationInProgress = true
@@ -576,6 +672,8 @@ final class PolarH10Recorder: NSObject, ObservableObject {
 
         h10RecordingFeatureReady = false
         fileTransferFeatureReady = false
+        onlineStreamingFeatureReady = false
+        hrFeatureReady = false
         didAutoRefreshCurrentConnection = false
         connectionState = .connecting
         statusText = "Reconnecting H10 for stored-file transfer…"
@@ -831,6 +929,428 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         }
     }
 
+    private func startResearchCapture(exerciseId: String, startedAt: Date) async {
+        rawCaptureExpected = true
+        UserDefaults.standard.set(true, forKey: Keys.rawCaptureExpected)
+
+        // The H10 internal RR record is already confirmed before we reach this code.
+        // Any failure below is therefore non-fatal to the safety/master recording.
+        for _ in 0..<50 where !onlineStreamingFeatureReady {
+            do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
+        }
+
+        guard onlineStreamingFeatureReady else {
+            rawStreamStatus = "RR only · PMD streaming service not ready"
+            rawStreamActive = false
+            return
+        }
+
+        do {
+            let available = try await api.getAvailableOnlineStreamDataTypes(deviceId)
+            var descriptors: [ResearchChannelDescriptor] = []
+            var ecgSetting: PolarSensorSetting?
+            var accSetting: PolarSensorSetting?
+
+            if available.contains(.ecg) {
+                let supported = try await api.requestStreamSettings(deviceId, feature: .ecg)
+                let selected = supported.maxSettings()
+                ecgSetting = selected
+                descriptors.append(
+                    channelDescriptor(
+                        channel: "ecg",
+                        source: "Polar H10 PMD",
+                        unit: "microvolt",
+                        encoding: "little_endian:uint64_timestamp_ns,int32_microvolts",
+                        supported: supported,
+                        selected: selected
+                    )
+                )
+            }
+
+            if available.contains(.acc) {
+                let supported = try await api.requestStreamSettings(deviceId, feature: .acc)
+                let selected = try conservativeAccelerometerSettings(from: supported)
+                accSetting = selected
+                descriptors.append(
+                    channelDescriptor(
+                        channel: "acc",
+                        source: "Polar H10 PMD",
+                        unit: "milli-g",
+                        encoding: "little_endian:uint64_timestamp_ns,int32_x_mg,int32_y_mg,int32_z_mg",
+                        supported: supported,
+                        selected: selected
+                    )
+                )
+            }
+
+            if hrFeatureReady {
+                descriptors.append(
+                    ResearchChannelDescriptor(
+                        channel: "hr",
+                        source: "Bluetooth Heart Rate Service",
+                        sampleRateHz: nil,
+                        unit: "bpm + rr_ms",
+                        recordEncoding: "ndjson:ResearchHRSample",
+                        supportedSettings: [:],
+                        selectedSettings: [:]
+                    )
+                )
+            }
+
+            guard !descriptors.isEmpty else {
+                rawStreamStatus = "RR only · ECG/accelerometer not advertised"
+                rawStreamActive = false
+                return
+            }
+
+            if await researchStore.activeCaptureId() == nil {
+                let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
+                let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? ""
+                let metadata = ResearchDeviceMetadata(
+                    deviceId: deviceId,
+                    model: "Polar H10",
+                    firmwareVersion: firmwareVersion,
+                    polarSdkVersion: PolarBleApiDefaultImpl.versionInfo(),
+                    appVersion: version,
+                    appBuild: build,
+                    internalRRExerciseId: exerciseId,
+                    batteryPercentAtStart: batteryPercent
+                )
+                _ = try await researchStore.begin(
+                    metadata: metadata,
+                    channels: descriptors,
+                    startedAt: startedAt
+                )
+            } else {
+                try? await researchStore.appendEvent(
+                    kind: "gap_ended",
+                    detail: "Bluetooth/PMD connection restored; raw streams restarting."
+                )
+            }
+
+            startStreamTasks(ecgSetting: ecgSetting, accSetting: accSetting)
+            await refreshRawCaptureSize()
+        } catch {
+            rawStreamActive = false
+            rawStreamStatus = "RR safe · high-resolution start failed"
+            try? await researchStore.appendEvent(
+                kind: "stream_start_failed",
+                detail: error.localizedDescription
+            )
+        }
+    }
+
+    private func resumeResearchStreamsAfterReconnect() async {
+        guard rawCaptureExpected, recordingOngoing, !rawStreamActive,
+              let exerciseId = currentExerciseId else { return }
+        let startedAt = UserDefaults.standard.object(forKey: Keys.startedAt) as? Date ?? Date()
+        await startResearchCapture(exerciseId: exerciseId, startedAt: startedAt)
+    }
+
+    private func recoverResearchAfterFeatureReadyIfNeeded() async {
+        guard rawCaptureExpected,
+              pendingFetchAvailable,
+              !recordingOngoing,
+              !didAutoRefreshCurrentConnection,
+              !nightActionInProgress,
+              !fetchInProgress,
+              !pftpOperationInProgress,
+              h10RecordingFeatureReady,
+              fileTransferFeatureReady else { return }
+
+        didAutoRefreshCurrentConnection = true
+        pftpOperationInProgress = true
+        defer { pftpOperationInProgress = false }
+
+        do {
+            let status = try await requestStatusWithTimeout()
+            recordingOngoing = status.ongoing
+            if status.ongoing {
+                if !status.entryId.isEmpty {
+                    currentExerciseId = status.entryId
+                    UserDefaults.standard.set(status.entryId, forKey: Keys.exerciseId)
+                }
+                await resumeResearchStreamsAfterReconnect()
+            } else {
+                rawCaptureExpected = false
+                UserDefaults.standard.set(false, forKey: Keys.rawCaptureExpected)
+                rawStreamStatus = "Previous high-resolution capture ended unexpectedly; raw chunks retained"
+            }
+        } catch {
+            didAutoRefreshCurrentConnection = false
+            rawStreamStatus = "RR safety state retained; high-resolution recovery will retry"
+        }
+    }
+
+    private func startStreamTasks(ecgSetting: PolarSensorSetting?, accSetting: PolarSensorSetting?) {
+        ecgStreamTask?.cancel()
+        accStreamTask?.cancel()
+        hrStreamTask?.cancel()
+
+        ecgStreamRunning = false
+        accStreamRunning = false
+        hrStreamRunning = false
+        lastECGAnchorAt = nil
+        lastACCAnchorAt = nil
+
+        if let ecgSetting {
+            ecgStreamRunning = true
+            ecgStreamTask = Task { [weak self] in
+                guard let self else { return }
+                do {
+                    for try await batch in self.api.startEcgStreaming(self.deviceId, settings: ecgSetting) {
+                        if Task.isCancelled { break }
+                        let receivedAt = Date()
+                        let samples = batch.map {
+                            ResearchECGSample(deviceTimestampNs: $0.timeStamp, voltageMicrovolts: $0.voltage)
+                        }
+                        try await self.researchStore.appendECG(samples)
+                        if let first = samples.first,
+                           self.lastECGAnchorAt.map({ receivedAt.timeIntervalSince($0) >= 60 }) ?? true {
+                            try await self.researchStore.appendTimeAnchor(
+                                channel: "ecg",
+                                deviceTimestampNs: first.deviceTimestampNs,
+                                hostReceivedAt: receivedAt
+                            )
+                            self.lastECGAnchorAt = receivedAt
+                        }
+                        await self.refreshRawCaptureSize()
+                    }
+                } catch {
+                    await self.streamEnded(channel: "ECG", error: error)
+                }
+            }
+        }
+
+        if let accSetting {
+            accStreamRunning = true
+            accStreamTask = Task { [weak self] in
+                guard let self else { return }
+                do {
+                    for try await batch in self.api.startAccStreaming(self.deviceId, settings: accSetting) {
+                        if Task.isCancelled { break }
+                        let receivedAt = Date()
+                        let samples = batch.map {
+                            ResearchACCSample(
+                                deviceTimestampNs: $0.timeStamp,
+                                xMilliG: $0.x,
+                                yMilliG: $0.y,
+                                zMilliG: $0.z
+                            )
+                        }
+                        try await self.researchStore.appendACC(samples)
+                        if let first = samples.first,
+                           self.lastACCAnchorAt.map({ receivedAt.timeIntervalSince($0) >= 60 }) ?? true {
+                            try await self.researchStore.appendTimeAnchor(
+                                channel: "acc",
+                                deviceTimestampNs: first.deviceTimestampNs,
+                                hostReceivedAt: receivedAt
+                            )
+                            self.lastACCAnchorAt = receivedAt
+                        }
+                        await self.refreshRawCaptureSize()
+                    }
+                } catch {
+                    await self.streamEnded(channel: "accelerometer", error: error)
+                }
+            }
+        }
+
+        if hrFeatureReady {
+            hrStreamRunning = true
+            hrStreamTask = Task { [weak self] in
+                guard let self else { return }
+                do {
+                    for try await batch in self.api.startHrStreaming(self.deviceId) {
+                        if Task.isCancelled { break }
+                        let receivedAt = Date()
+                        let samples = batch.map {
+                            ResearchHRSample(
+                                receivedAt: receivedAt,
+                                bpm: $0.hr,
+                                rrMs: $0.rrsMs,
+                                rrAvailable: $0.rrAvailable,
+                                contactStatus: $0.contactStatus,
+                                contactStatusSupported: $0.contactStatusSupported
+                            )
+                        }
+                        try await self.researchStore.appendHR(samples)
+                        await self.refreshRawCaptureSize()
+                    }
+                } catch {
+                    await self.streamEnded(channel: "HR", error: error)
+                }
+            }
+        }
+
+        rawStreamActive = ecgStreamRunning || accStreamRunning || hrStreamRunning
+        let channels = [
+            ecgStreamRunning ? "ECG" : nil,
+            accStreamRunning ? "ACC" : nil,
+            hrStreamRunning ? "HR" : nil
+        ].compactMap { $0 }
+        rawStreamStatus = channels.isEmpty ? "RR only" : channels.joined(separator: " + ")
+    }
+
+    private func streamEnded(channel: String, error: Error) async {
+        if Task.isCancelled { return }
+        await noteResearchGapAndReconnect(
+            detail: "\(channel) stream ended: \(error.localizedDescription)"
+        )
+    }
+
+    private func stopResearchCapture(reason: String) async {
+        let storedCaptureId = await researchStore.activeCaptureId()
+        let hadCapture = rawCaptureExpected || rawStreamActive || storedCaptureId != nil
+        rawCaptureExpected = false
+        UserDefaults.standard.set(false, forKey: Keys.rawCaptureExpected)
+        researchReconnectTask?.cancel()
+        researchReconnectTask = nil
+
+        ecgStreamTask?.cancel()
+        accStreamTask?.cancel()
+        hrStreamTask?.cancel()
+        ecgStreamTask = nil
+        accStreamTask = nil
+        hrStreamTask = nil
+
+        if connectionState == .connected {
+            if ecgStreamRunning { try? await api.stopStreaming(deviceId, type: .ecg) }
+            if accStreamRunning { try? await api.stopStreaming(deviceId, type: .acc) }
+            if hrStreamRunning { try? await api.stopHrStreaming(deviceId) }
+        }
+
+        ecgStreamRunning = false
+        accStreamRunning = false
+        hrStreamRunning = false
+        rawStreamActive = false
+
+        if hadCapture {
+            try? await researchStore.appendEvent(kind: "capture_stop_requested", detail: reason)
+            if let summary = try? await researchStore.finish(
+                state: .completed,
+                batteryPercentAtEnd: batteryPercent
+            ) {
+                rawCaptureBytes = summary.totalBytes
+            }
+        }
+        rawStreamStatus = "Stopped"
+    }
+
+    private func noteResearchGapAndReconnect(detail: String) async {
+        guard rawCaptureExpected else { return }
+        if researchReconnectTask != nil { return }
+        ecgStreamTask?.cancel()
+        accStreamTask?.cancel()
+        hrStreamTask?.cancel()
+        ecgStreamTask = nil
+        accStreamTask = nil
+        hrStreamTask = nil
+        ecgStreamRunning = false
+        accStreamRunning = false
+        hrStreamRunning = false
+        rawStreamActive = false
+        rawStreamStatus = "RR safe · reconnecting high-resolution stream"
+        try? await researchStore.appendEvent(kind: "gap_started", detail: detail)
+        scheduleResearchReconnect()
+    }
+
+    private func scheduleResearchReconnect() {
+        guard rawCaptureExpected, recordingOngoing, bluetoothOn else { return }
+        guard researchReconnectTask == nil else { return }
+
+        researchReconnectTask = Task { [weak self] in
+            guard let self else { return }
+            let delays: [UInt64] = [2, 5, 10, 20, 30]
+            for delay in delays {
+                if Task.isCancelled || !self.rawCaptureExpected || !self.recordingOngoing { break }
+                do { try await Task.sleep(for: .seconds(delay)) } catch { break }
+
+                if self.connectionState == .connected {
+                    if self.onlineStreamingFeatureReady {
+                        await self.resumeResearchStreamsAfterReconnect()
+                        if self.rawStreamActive { break }
+                    }
+                    continue
+                }
+
+                do {
+                    try self.api.connectToDevice(self.deviceId)
+                } catch {
+                    try? await self.researchStore.appendEvent(
+                        kind: "reconnect_failed",
+                        detail: error.localizedDescription
+                    )
+                }
+            }
+            self.researchReconnectTask = nil
+        }
+    }
+
+    private func refreshRawCaptureSize() async {
+        if let summary = await researchStore.activeSummary() {
+            rawCaptureBytes = summary.totalBytes
+        }
+    }
+
+    private func channelDescriptor(
+        channel: String,
+        source: String,
+        unit: String,
+        encoding: String,
+        supported: PolarSensorSetting,
+        selected: PolarSensorSetting
+    ) -> ResearchChannelDescriptor {
+        let supportedMap = Dictionary(uniqueKeysWithValues: supported.settings.map {
+            (settingName($0.key), Array($0.value).sorted())
+        })
+        var selectedMap: [String: UInt32] = [:]
+        for (type, values) in selected.settings {
+            if let value = values.first {
+                selectedMap[settingName(type)] = value
+            }
+        }
+        return ResearchChannelDescriptor(
+            channel: channel,
+            source: source,
+            sampleRateHz: selected.settings[.sampleRate]?.first,
+            unit: unit,
+            recordEncoding: encoding,
+            supportedSettings: supportedMap,
+            selectedSettings: selectedMap
+        )
+    }
+
+    private func conservativeAccelerometerSettings(from supported: PolarSensorSetting) throws -> PolarSensorSetting {
+        var selected: [PolarSensorSetting.SettingType: UInt32] = [:]
+        for (type, values) in supported.settings {
+            guard !values.isEmpty else { continue }
+            if type == .sampleRate {
+                // 25 Hz is already sufficient for overnight movement/restlessness,
+                // while materially reducing H10/iPhone battery and raw storage cost.
+                selected[type] = values.contains(25) ? 25 : values.min()
+            } else if type == .range || type == .rangeMilliunit {
+                // Overnight body movement is low amplitude; choose the smallest
+                // available accelerometer range for the highest useful resolution.
+                selected[type] = values.min()
+            } else {
+                selected[type] = values.max()
+            }
+        }
+        return try PolarSensorSetting(selected)
+    }
+
+    private func settingName(_ type: PolarSensorSetting.SettingType) -> String {
+        switch type {
+        case .sampleRate: return "sample_rate_hz"
+        case .resolution: return "resolution_bits"
+        case .range: return "range"
+        case .rangeMilliunit: return "range_milliunit"
+        case .channels: return "channels"
+        case .unknown: return "unknown"
+        }
+    }
+
     private func requestStatusWithTimeout() async throws -> PolarRecordingStatus {
         let sensorAPI = api
         let sensorId = deviceId
@@ -887,12 +1407,15 @@ final class PolarH10Recorder: NSObject, ObservableObject {
     }
 }
 
+
 extension PolarH10Recorder: PolarBleApiObserver {
     nonisolated func deviceConnecting(_ identifier: PolarDeviceInfo) {
         Task { @MainActor in
             self.connectionState = .connecting
             self.h10RecordingFeatureReady = false
             self.fileTransferFeatureReady = false
+            self.onlineStreamingFeatureReady = false
+            self.hrFeatureReady = false
             self.didAutoRefreshCurrentConnection = false
             self.statusText = "Connecting to \(identifier.deviceId)…"
         }
@@ -914,9 +1437,14 @@ extension PolarH10Recorder: PolarBleApiObserver {
             self.connectionState = .disconnected
             self.h10RecordingFeatureReady = false
             self.fileTransferFeatureReady = false
+            self.onlineStreamingFeatureReady = false
+            self.hrFeatureReady = false
             self.didAutoRefreshCurrentConnection = false
+            if self.rawCaptureExpected && self.recordingOngoing {
+                await self.noteResearchGapAndReconnect(detail: "Bluetooth disconnected")
+            }
             if self.recordingOngoing {
-                self.statusText = "Phone disconnected; H10 sensor-side recording remains the source of truth."
+                self.statusText = "Phone disconnected; H10 internal RR remains the source of truth."
             } else {
                 self.statusText = "Disconnected."
             }
@@ -928,6 +1456,9 @@ extension PolarH10Recorder: PolarBleApiPowerStateObserver {
     nonisolated func blePowerOn() {
         Task { @MainActor in
             self.bluetoothOn = true
+            if self.rawCaptureExpected && self.recordingOngoing {
+                self.scheduleResearchReconnect()
+            }
         }
     }
 
@@ -939,7 +1470,12 @@ extension PolarH10Recorder: PolarBleApiPowerStateObserver {
             self.connectionState = .disconnected
             self.h10RecordingFeatureReady = false
             self.fileTransferFeatureReady = false
-            self.statusText = "Bluetooth is off."
+            self.onlineStreamingFeatureReady = false
+            self.hrFeatureReady = false
+            if self.rawCaptureExpected && self.recordingOngoing {
+                try? await self.researchStore.appendEvent(kind: "gap_started", detail: "Bluetooth powered off.")
+            }
+            self.statusText = "Bluetooth is off. H10 internal RR continues independently."
         }
     }
 }
@@ -952,8 +1488,20 @@ extension PolarH10Recorder: PolarBleApiDeviceFeaturesObserver {
                 self.h10RecordingFeatureReady = true
             case .feature_polar_file_transfer:
                 self.fileTransferFeatureReady = true
+            case .feature_polar_online_streaming:
+                self.onlineStreamingFeatureReady = true
+            case .feature_hr:
+                self.hrFeatureReady = true
             default:
-                return
+                break
+            }
+
+            if self.rawCaptureExpected,
+               self.recordingOngoing,
+               self.connectionState == .connected,
+               self.onlineStreamingFeatureReady,
+               !self.rawStreamActive {
+                Task { await self.resumeResearchStreamsAfterReconnect() }
             }
 
             guard
@@ -962,6 +1510,12 @@ extension PolarH10Recorder: PolarBleApiDeviceFeaturesObserver {
                 self.fileTransferFeatureReady
             else {
                 return
+            }
+
+            if self.rawCaptureExpected,
+               self.pendingFetchAvailable,
+               !self.recordingOngoing {
+                Task { await self.recoverResearchAfterFeatureReadyIfNeeded() }
             }
 
             self.preparationTask?.cancel()

@@ -13,7 +13,6 @@ struct ContentView: View {
     @EnvironmentObject private var notifications: RecorderNotifications
     @State private var actionGate = NightActionGate()
     @State private var nightActionWasEnd = false
-    @State private var pendingWidgetAction = false
     @State private var showSettings = false
     @State private var showRecordings = false
     @State private var savedFiles: [SavedRecordingFile] = []
@@ -118,20 +117,14 @@ struct ContentView: View {
             .sheet(isPresented: $showSettings) { settings }
             .sheet(isPresented: $showRecordings, onDismiss: { Task { await refreshSavedFiles() } }) { recordings }
             .onOpenURL { url in
-                if RecorderCompanionPolicy.isNightAction(url) {
-                    guard !actionGate.running else { return }
-                    pendingWidgetAction = true
-                    consumeWidgetAction()
-                } else {
-                    Task { _ = await uploader.handleConnectionURL(url) }
-                }
+                Task { _ = await uploader.handleConnectionURL(url) }
             }
             .onChange(of: recorder.pendingFetchAvailable) { _ in syncReminders() }
             .onChange(of: recorder.recordingOngoing) { _ in syncReminders() }
             .task {
+                await recorder.prepareRawCaptureRecovery()
                 syncReminders()
                 await notifications.refreshAuthorization()
-                consumeWidgetAction()
                 // Retry transient network/archive failures while this view is active.
                 while !Task.isCancelled {
                     if scenePhase == .active {
@@ -156,7 +149,6 @@ struct ContentView: View {
             }
             .onChange(of: scenePhase) { phase in
                 if phase == .active {
-                    consumeWidgetAction()
                     Task {
                         syncReminders()
                         await notifications.refreshAuthorization()
@@ -285,19 +277,13 @@ struct ContentView: View {
             startedAt: UserDefaults.standard.object(forKey: "h10.startedAt") as? Date)
     }
 
-    private func consumeWidgetAction() {
-        guard pendingWidgetAction, scenePhase == .active else { return }
-        pendingWidgetAction = false
-        primaryAction()
-    }
-
     private func primaryAction() {
         guard actionGate.begin() else { return }
         nightActionWasEnd = recorder.recordingOngoing || recorder.pendingFetchAvailable
         Task {
             defer { actionGate.finish() }
             await notifications.refreshAuthorization()
-            // CoreBluetooth may still be initializing during a widget cold launch.
+            // CoreBluetooth may still be initializing during an app cold launch.
             for _ in 0..<10 where !recorder.bluetoothOn {
                 try? await Task.sleep(for: .milliseconds(200))
             }
@@ -353,6 +339,18 @@ struct ContentView: View {
             for file in files.reversed() {
                 if Task.isCancelled || !uploader.isConnected { break }
                 await upload(file.url)
+            }
+
+            // Rich raw stream capture is archived independently. Failure here
+            // never changes the verified RR cleanup/deletion rules above.
+            if uploader.isConnected {
+                let researchStore = ResearchCaptureStore.shared
+                let captures = try await researchStore.pendingArchives()
+                for capture in captures {
+                    if Task.isCancelled || !uploader.isConnected { break }
+                    guard await uploader.uploadResearchCapture(capture) != nil else { break }
+                    try await researchStore.deleteVerifiedArchive(capture)
+                }
             }
         } catch {
             uploader.reportLocalCleanupError(error)
@@ -411,10 +409,6 @@ struct ContentView: View {
                     Text("Morning reminders are scheduled only for a night awaiting collection. Alerts confirm recording and verified archival, or tell you when attention is needed. Reminder times follow your iPhone's local time.")
                         .font(.footnote).foregroundStyle(.secondary)
                     if let error = notifications.error { Text(error).font(.footnote).foregroundStyle(.orange) }
-                }
-                Section("Home Screen widget") {
-                    Text("Add AthleteOS Recorder → Night recorder from your Home Screen's widget gallery. One tap opens Recorder and runs Start night or End night using the saved night state.")
-                    Text("Keep the widget extension when installing through SideStore.").font(.footnote).foregroundStyle(.secondary)
                 }
                 Section("Sensor storage") {
                     if recorder.pendingFetchAvailable {

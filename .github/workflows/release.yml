@@ -1,38 +1,80 @@
 name: Release AthleteOS Recorder
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - "release/**"
 concurrency:
   group: recorder-release
   cancel-in-progress: false
 permissions:
   contents: write
+
 jobs:
   release:
     runs-on: macos-15
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
       - name: Regression tests
         run: |
-          swiftc Sources/RecorderCompanionPolicy.swift Sources/NightConnectionPolicy.swift Sources/RecordingModels.swift Sources/RecordingStore.swift Sources/UploadReceipt.swift Sources/AthleteOSUploader.swift Tests/RecorderRegression.swift -o /tmp/recorder-regression
+          swiftc Sources/NightConnectionPolicy.swift Sources/RecordingModels.swift Sources/RecordingStore.swift Sources/ResearchCaptureStore.swift Sources/UploadReceipt.swift Sources/AthleteOSUploader.swift Tests/RecorderRegression.swift -o /tmp/recorder-regression
           /tmp/recorder-regression
+
       - name: Install XcodeGen
         run: brew install xcodegen
+
       - name: Generate Xcode project
         run: xcodegen generate
+
       - name: Cache pinned Polar dependencies
         uses: actions/cache@v4
         with:
           path: .swift-packages
           key: polar-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('project.yml') }}
+
       - name: Resolve Polar BLE SDK
         run: xcodebuild -resolvePackageDependencies -clonedSourcePackagesDirPath .swift-packages -project AthleteOSRecorder.xcodeproj -scheme AthleteOSRecorder
+
       - name: Compile iPhone simulator
         run: xcodebuild -clonedSourcePackagesDirPath .swift-packages -project AthleteOSRecorder.xcodeproj -scheme AthleteOSRecorder -configuration Debug -sdk iphonesimulator -derivedDataPath build-simulator -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build
+
       - name: Build unsigned device app
         run: xcodebuild -clonedSourcePackagesDirPath .swift-packages -project AthleteOSRecorder.xcodeproj -scheme AthleteOSRecorder -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build-device CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
+
+      - name: Validate app bundle
+        run: |
+          set -euo pipefail
+          APP="build-device/Build/Products/Release-iphoneos/AthleteOSRecorder.app"
+          test -d "$APP"
+          VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Info.plist")
+          BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP/Info.plist")
+          test "$VERSION" = "2.1.0"
+          test "$BUILD" = "15"
+
+          # WidgetKit was explicitly removed. No app extension may ship in the Recorder IPA.
+          if find "$APP" -type d -name '*.appex' -print -quit | grep -q .; then
+            echo "Unexpected app extension found in Recorder bundle."
+            find "$APP" -type d -name '*.appex' -print
+            exit 1
+          fi
+
+          # The asset catalog and a compiled AppIcon must exist in the actual device build.
+          test -s "$APP/Assets.car"
+          /usr/bin/assetutil --info "$APP/Assets.car" > /tmp/assets.json
+          grep -q '"Name" : "AppIcon"' /tmp/assets.json || {
+            echo "Compiled AppIcon was not found in Assets.car"
+            cat /tmp/assets.json
+            exit 1
+          }
+
+          # Background BLE is required for locked-phone streaming.
+          /usr/libexec/PlistBuddy -c "Print :UIBackgroundModes:0" "$APP/Info.plist" | grep -qx "bluetooth-central"
+
       - name: Package unsigned IPA
         run: |
           set -euo pipefail
@@ -41,24 +83,23 @@ jobs:
           cp -R build-device/Build/Products/Release-iphoneos/AthleteOSRecorder.app Payload/
           zip -qry AthleteOSRecorder.ipa Payload
           test -s AthleteOSRecorder.ipa
-      - name: Publish stable build artifact
+
+      - name: Publish immutable artifact then SideStore metadata
+        env:
+          REPO: Seedytim/-athleteos-recorder-build
+          SIDE_SOURCE_URL: https://athleteos-pink-sigma.vercel.app/recorder/source.json
+          SIDE_ICON_URL: https://athleteos-pink-sigma.vercel.app/recorder/icon.png
         run: |
           set -euo pipefail
+
           APP="build-device/Build/Products/Release-iphoneos/AthleteOSRecorder.app"
           VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Info.plist")
           BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP/Info.plist")
           SIZE=$(stat -f%z AthleteOSRecorder.ipa)
           SHA256=$(shasum -a 256 AthleteOSRecorder.ipa | awk '{print $1}')
-          mkdir -p dist
-          cp AthleteOSRecorder.ipa dist/AthleteOSRecorder.ipa
+          DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
           SOURCE=$(git rev-parse HEAD)
-          python3 - "$VERSION" "$BUILD" "$SIZE" "$SHA256" "$SOURCE" <<'PY'
-          import json, sys
-          version, build, size, sha256, source = sys.argv[1:]
-          with open("dist/build.json","w") as f:
-              json.dump({"version":version,"build":build,"size":int(size),"sha256":sha256,"source_commit":source},f,indent=2)
-              f.write("\n")
-          PY
+
           git config user.name "Seedytim"
           git config user.email "103544048+Seedytim@users.noreply.github.com"
           git fetch origin main
@@ -66,7 +107,115 @@ jobs:
             echo "main changed during release; refusing to publish a stale IPA."
             exit 1
           fi
-          git add dist
-          if git diff --cached --quiet; then exit 0; fi
-          git commit -m "Publish AthleteOS Recorder ${VERSION} (${BUILD})"
+
+          mkdir -p dist
+          cp AthleteOSRecorder.ipa dist/AthleteOSRecorder.ipa
+
+          # Commit and publish the binary FIRST. SideStore metadata is not changed yet.
+          git add dist/AthleteOSRecorder.ipa
+          if git diff --cached --quiet; then
+            echo "Release IPA did not change; refusing ambiguous publication."
+            exit 1
+          fi
+          git commit -m "Publish AthleteOS Recorder artifact ${VERSION} (${BUILD})"
+          ARTIFACT_COMMIT=$(git rev-parse HEAD)
           git push origin HEAD:main
+
+          DOWNLOAD_URL="https://raw.githubusercontent.com/${REPO}/${ARTIFACT_COMMIT}/dist/AthleteOSRecorder.ipa"
+
+          # Prove the immutable URL serves the exact IPA before feed publication.
+          curl -fL --retry 4 --retry-delay 2 "$DOWNLOAD_URL" -o /tmp/immutable.ipa
+          REMOTE_SIZE=$(stat -f%z /tmp/immutable.ipa)
+          REMOTE_SHA=$(shasum -a 256 /tmp/immutable.ipa | awk '{print $1}')
+          test "$REMOTE_SIZE" = "$SIZE"
+          test "$REMOTE_SHA" = "$SHA256"
+
+          python3 - "$VERSION" "$BUILD" "$SIZE" "$SHA256" "$SOURCE" "$ARTIFACT_COMMIT" "$DOWNLOAD_URL" "$DATE" "$SIDE_SOURCE_URL" "$SIDE_ICON_URL" <<'PY'
+          import json, sys
+          version, build, size, sha256, source, artifact, download, date, source_url, icon_url = sys.argv[1:]
+          build_meta = {
+              "version": version,
+              "build": build,
+              "size": int(size),
+              "sha256": sha256,
+              "source_commit": source,
+              "artifact_commit": artifact,
+              "download_url": download,
+          }
+          feed = {
+              "name": "AthleteOS Recorder",
+              "identifier": "nz.co.athleteos.recorder.source",
+              "sourceURL": source_url,
+              "apps": [{
+                  "name": "AthleteOS Recorder",
+                  "bundleIdentifier": "nz.co.athleteos.recorder",
+                  "developerName": "AthleteOS",
+                  "localizedDescription": "Raw Polar H10 overnight recorder. AthleteOS performs all analysis and coaching.",
+                  "iconURL": icon_url,
+                  "versions": [{
+                      "version": version,
+                      "buildVersion": build,
+                      "date": date,
+                      "localizedDescription": "One-button Recorder with richer raw H10 capture underneath: safety RR plus ECG, accelerometer and HR.",
+                      "downloadURL": download,
+                      "size": int(size),
+                      "minOSVersion": "16.0",
+                  }],
+              }],
+          }
+          with open("dist/build.json", "w") as f:
+              json.dump(build_meta, f, indent=2)
+              f.write("\n")
+          with open("dist/source.json", "w") as f:
+              json.dump(feed, f, indent=2)
+              f.write("\n")
+          PY
+
+          # Feed must agree with the artifact metadata exactly.
+          python3 - "$VERSION" "$BUILD" "$SIZE" "$SHA256" "$DOWNLOAD_URL" <<'PY'
+          import hashlib, json, sys, urllib.request
+          version, build, size, sha256, expected_url = sys.argv[1:]
+          meta = json.load(open("dist/build.json"))
+          feed = json.load(open("dist/source.json"))
+          v = feed["apps"][0]["versions"][0]
+          assert meta["version"] == version == v["version"]
+          assert str(meta["build"]) == str(build) == str(v["buildVersion"])
+          assert int(meta["size"]) == int(size) == int(v["size"])
+          assert meta["sha256"] == sha256
+          assert meta["download_url"] == expected_url == v["downloadURL"]
+          with urllib.request.urlopen(expected_url, timeout=60) as r:
+              data = r.read()
+          assert len(data) == int(size)
+          assert hashlib.sha256(data).hexdigest() == sha256
+          print("SideStore metadata and immutable IPA agree.")
+          PY
+
+          # Only after all validation passes is the feed metadata published.
+          git add dist/build.json dist/source.json
+          git commit -m "Publish AthleteOS Recorder metadata ${VERSION} (${BUILD})"
+          git push origin HEAD:main
+
+          # The production SideStore source is a stable AthleteOS URL that proxies
+          # this Recorder-owned feed. Refuse success until the live source resolves
+          # to the exact immutable artifact that was just validated.
+          for attempt in 1 2 3 4 5; do
+            if curl -fL --no-cache "$SIDE_SOURCE_URL" -o /tmp/live-source.json; then
+              if python3 - "$VERSION" "$BUILD" "$SIZE" "$DOWNLOAD_URL" <<'PY'
+          import json, sys
+          version, build, size, download = sys.argv[1:]
+          feed = json.load(open("/tmp/live-source.json"))
+          v = feed["apps"][0]["versions"][0]
+          assert v["version"] == version
+          assert str(v["buildVersion"]) == str(build)
+          assert int(v["size"]) == int(size)
+          assert v["downloadURL"] == download
+          PY
+              then
+                echo "Production SideStore source resolves to the validated artifact."
+                exit 0
+              fi
+            fi
+            sleep 3
+          done
+          echo "Production SideStore source did not converge to the published artifact."
+          exit 1
