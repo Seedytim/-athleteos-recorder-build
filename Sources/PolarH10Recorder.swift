@@ -737,22 +737,26 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         let stoppedAt = (UserDefaults.standard.object(forKey: Keys.stoppedAt) as? Date) ?? Date()
 
         do {
-            // Polar documents PFTP 106 with affected H10 firmware when dual-BLE
-            // connection mode is enabled. Disable it before every retained-file
-            // recovery attempt, including recordings created by older builds.
-            statusText = "Preparing H10 single-connection mode for retained file…"
-            try await enforceSingleBLEConnectionMode(context: "before retained RR recovery")
-
-            // Once an exercise is stopped, PS-FTP is the only service required.
-            // If it is already ready, do not reset a healthy BLE connection.
+            // A retained recording may be retried after the app has relaunched or
+            // after BLE has gone idle. Re-establish a real PS-FTP session FIRST.
+            // Build 25 incorrectly queried multi-BLE mode while disconnected, which
+            // guaranteed Polar SDK error 2/3 before reconnect could even run.
             if !StoredFetchConnectionPolicy.ready(
                 connected: connectionState == .connected,
                 transferReady: fileTransferFeatureReady
             ) {
                 try await resetConnectionForStoredFetch()
             } else {
-                statusText = "H10 file transfer ready. Reading saved RR file…"
+                statusText = "H10 file transfer ready."
             }
+
+            // Polar documents PFTP 106 with affected H10 firmware when dual-BLE
+            // connection mode is enabled. Only query/disable it after the H10 has a
+            // verified live session.
+            statusText = "Preparing H10 single-connection mode for retained file…"
+            try await enforceSingleBLEConnectionMode(context: "before retained RR recovery")
+
+            statusText = "H10 single-connection mode confirmed. Reading saved RR file…"
             await fetchAndSaveStoredRecording(stoppedAt: stoppedAt)
         } catch {
             pendingFetchAvailable = true
@@ -769,7 +773,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                 let enabled = try await sensorAPI.getMultiBLEConnectionMode(identifier: identifier)
 
                 if enabled {
-                    statusText = "Disabling H10 dual-Bluetooth mode (context)…"
+                    statusText = "Disabling H10 dual-Bluetooth mode \(context)…"
                     try await sensorAPI.setMultiBLEConnectionMode(identifier: identifier, enable: false)
                 }
 
