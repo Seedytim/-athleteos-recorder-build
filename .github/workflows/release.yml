@@ -200,15 +200,15 @@ jobs:
           for attempt in 1 2 3 4 5; do
             if curl -fL --no-cache "$SIDE_SOURCE_URL" -o /tmp/live-source.json; then
               if python3 - "$VERSION" "$BUILD" "$SIZE" "$DOWNLOAD_URL" <<'PY'
-import json, sys
-version, build, size, download = sys.argv[1:]
-feed = json.load(open("/tmp/live-source.json"))
-v = feed["apps"][0]["versions"][0]
-assert v["version"] == version
-assert str(v["buildVersion"]) == str(build)
-assert int(v["size"]) == int(size)
-assert v["downloadURL"] == download
-PY
+          import json, sys
+          version, build, size, download = sys.argv[1:]
+          feed = json.load(open("/tmp/live-source.json"))
+          v = feed["apps"][0]["versions"][0]
+          assert v["version"] == version
+          assert str(v["buildVersion"]) == str(build)
+          assert int(v["size"]) == int(size)
+          assert v["downloadURL"] == download
+          PY
               then
                 echo "Production SideStore source resolves to the validated artifact."
                 exit 0
