@@ -12,11 +12,11 @@
       "versions": [
         {
           "version": "2.1.2",
-          "buildVersion": "18",
-          "date": "2026-10-06T05:18:26Z",
-          "localizedDescription": "Includes H10 timeout hardening: 45-second operations and 240-second stored RR reads, with reconnect retries and retained sensor data on failure.",
-          "downloadURL": "https://raw.githubusercontent.com/Seedytim/-athleteos-recorder-build/9fd831a083fb5f17bbe569a04bb4539955842367/dist/AthleteOSRecorder.ipa",
-          "size": 4100287,
+          "buildVersion": "19",
+          "date": "2026-10-06T06:48:30Z",
+          "localizedDescription": "Adds packet-confirmed ECG and accelerometer recovery, silent-stream watchdogs, BLE reset fallback, and explicit wall-clock coverage diagnostics.",
+          "downloadURL": "https://raw.githubusercontent.com/Seedytim/-athleteos-recorder-build/8857e07b1c5796f33febac6bd333285cf78eca14/dist/AthleteOSRecorder.ipa",
+          "size": 4130173,
           "minOSVersion": "16.0"
         }
       ]
