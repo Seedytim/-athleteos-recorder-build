@@ -1,6 +1,9 @@
 name: Release AthleteOS Recorder
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - "release/**"
 concurrency:
   group: recorder-release
   cancel-in-progress: false
@@ -53,12 +56,11 @@ jobs:
           test "$VERSION" = "2.1.0"
           test "$BUILD" = "15"
 
-          # WidgetKit was intentionally removed. No app extension may ship.
-          if find "$APP" -type d -name '*.appex' -print -quit | grep -q .; then
-            echo "Unexpected app extension found in Recorder bundle."
-            find "$APP" -type d -name '*.appex' -print
-            exit 1
-          fi
+          # Preserve the existing one-tap Home Screen widget.
+          WIDGET="$APP/PlugIns/RecorderWidget.appex"
+          test -d "$WIDGET"
+          APPEX_COUNT=$(find "$APP" -type d -name '*.appex' | wc -l | tr -d ' ')
+          test "$APPEX_COUNT" = "1"
 
           # The asset catalog and a compiled AppIcon must exist in the actual device build.
           test -s "$APP/Assets.car"
@@ -153,7 +155,7 @@ jobs:
                       "version": version,
                       "buildVersion": build,
                       "date": date,
-                      "localizedDescription": "Raw-only Recorder: H10 safety RR plus diagnostic ECG, accelerometer and HR capture. Widget removed.",
+                      "localizedDescription": "Same one-button Recorder with richer raw H10 capture underneath: safety RR plus ECG, accelerometer and HR.",
                       "downloadURL": download,
                       "size": int(size),
                       "minOSVersion": "16.0",
@@ -191,3 +193,28 @@ jobs:
           git add dist/build.json dist/source.json
           git commit -m "Publish AthleteOS Recorder metadata ${VERSION} (${BUILD})"
           git push origin HEAD:main
+
+          # The production SideStore source is a stable AthleteOS URL that proxies
+          # this Recorder-owned feed. Refuse success until the live source resolves
+          # to the exact immutable artifact that was just validated.
+          for attempt in 1 2 3 4 5; do
+            if curl -fL --no-cache "$SIDE_SOURCE_URL" -o /tmp/live-source.json; then
+              if python3 - "$VERSION" "$BUILD" "$SIZE" "$DOWNLOAD_URL" <<'PY'
+import json, sys
+version, build, size, download = sys.argv[1:]
+feed = json.load(open("/tmp/live-source.json"))
+v = feed["apps"][0]["versions"][0]
+assert v["version"] == version
+assert str(v["buildVersion"]) == str(build)
+assert int(v["size"]) == int(size)
+assert v["downloadURL"] == download
+PY
+              then
+                echo "Production SideStore source resolves to the validated artifact."
+                exit 0
+              fi
+            fi
+            sleep 3
+          done
+          echo "Production SideStore source did not converge to the published artifact."
+          exit 1
