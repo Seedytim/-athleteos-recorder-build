@@ -124,6 +124,8 @@ actor ResearchCaptureStore {
         var handle: FileHandle
         var bytes: UInt64
         var records: UInt64
+        var bytesSinceSync: UInt64
+        var lastSyncAt: Date
     }
 
     private struct ActiveCapture {
@@ -484,13 +486,24 @@ actor ResearchCaptureStore {
 
         try writer.handle.seekToEnd()
         try writer.handle.write(contentsOf: data)
-        try writer.handle.synchronize()
         writer.bytes += UInt64(data.count)
         writer.records += recordCount
+        writer.bytesSinceSync += UInt64(data.count)
+
+        updateManifestFile(writer: writer, capture: &capture)
+
+        // PMD packets arrive frequently. fsync/manifest-rewrite on every BLE packet
+        // burns battery and can become the bottleneck overnight. Flush boundedly:
+        // at most ~5 seconds or 64 KiB of newly written binary data is pending.
+        let now = Date()
+        if writer.bytesSinceSync >= 64 * 1024 || now.timeIntervalSince(writer.lastSyncAt) >= 5 {
+            try writer.handle.synchronize()
+            writer.bytesSinceSync = 0
+            writer.lastSyncAt = now
+            try writeManifest(capture.manifest, to: capture.manifestURL)
+        }
 
         capture.writers[channel] = writer
-        updateManifestFile(writer: writer, capture: &capture)
-        try writeManifest(capture.manifest, to: capture.manifestURL)
         active = capture
     }
 
@@ -503,6 +516,8 @@ actor ResearchCaptureStore {
         if var current = capture.writers[channel] {
             if current.bytes > 0 && current.bytes + additionalBytes > chunkLimitBytes {
                 try current.handle.synchronize()
+                updateManifestFile(writer: current, capture: &capture)
+                try writeManifest(capture.manifest, to: capture.manifestURL)
                 try current.handle.close()
                 capture.writers.removeValue(forKey: channel)
                 return try createWriter(
@@ -538,7 +553,9 @@ actor ResearchCaptureStore {
             fileURL: url,
             handle: handle,
             bytes: size,
-            records: 0
+            records: 0,
+            bytesSinceSync: 0,
+            lastSyncAt: Date()
         )
         capture.writers[channel] = writer
         if !capture.manifest.files.contains(where: { $0.fileName == name }) {
