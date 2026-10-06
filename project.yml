@@ -16,7 +16,7 @@ targets:
     platform: iOS
     sources:
       - path: Sources
-      - path: Resources
+      - path: Resources/Assets.xcassets
         buildPhase: resources
     preBuildScripts:
       - name: Generate App Icons
