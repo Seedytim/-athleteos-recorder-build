@@ -467,7 +467,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
     var stoppedRecordingAwaitingFetch: Bool {
         pendingFetchAvailable &&
         !recordingOngoing &&
-        UserDefaults.standard.object(forKey: Keys.stoppedAt) as? Date != nil
+        (UserDefaults.standard.object(forKey: Keys.stoppedAt) as? Date) != nil
     }
 
     var preparationMessage: String {
@@ -681,7 +681,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
             await fetchAndSaveStoredRecording(stoppedAt: stoppedAt ?? Date())
         } catch {
             pendingFetchAvailable = true
-            fail("Stop/fetch/save failed: \(friendlyError(error)). Sensor copy retained; use Retry Fetch.")
+            fail("Stop/fetch/save failed: \(friendlyError(error)). Sensor copy retained; tap End night to retry.")
         }
     }
 
@@ -716,7 +716,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
             await fetchAndSaveStoredRecording(stoppedAt: stoppedAt)
         } catch {
             pendingFetchAvailable = true
-            fail("Reconnect for fetch failed: (friendlyError(error)). Sensor copy retained.")
+            fail("Reconnect for fetch failed: (friendlyError(error)). Sensor copy retained; tap End night to retry.")
         }
     }
 
@@ -855,22 +855,31 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                 try await persistFetchedExercise(exercise, entry: entry, stoppedAt: stoppedAt)
                 return
             } catch {
+                // A failed reconnect is already a definitive transport failure for
+                // this attempt. Do not immediately spend another ~15 seconds doing
+                // the same reset again; the sensor copy remains safe.
+                if isStoredFetchReconnectFailure(error) {
+                    pendingFetchAvailable = true
+                    fail("H10 reconnect failed: (friendlyError(error)). Sensor copy retained; tap End night to retry.")
+                    return
+                }
+
                 if attempt < maxAttempts {
                     let delay = retryDelays[min(attempt - 1, retryDelays.count - 1)]
-                    statusText = "H10 file read did not finish. Resetting connection in \(delay)s…"
+                    statusText = "H10 file read did not finish. Resetting connection in (delay)s…"
                     try? await Task.sleep(for: .seconds(delay))
                     do {
                         try await resetConnectionForStoredFetch()
                     } catch {
                         pendingFetchAvailable = true
-                        fail("H10 reconnect failed: \(friendlyError(error)). Sensor copy retained.")
+                        fail("H10 reconnect failed: (friendlyError(error)). Sensor copy retained; tap End night to retry.")
                         return
                     }
                     continue
                 }
 
                 pendingFetchAvailable = true
-                fail("Fetch failed after \(maxAttempts) clean reconnects: \(friendlyError(error)). Sensor copy retained.")
+                fail("Fetch failed after (maxAttempts) attempts: (friendlyError(error)). Sensor copy retained; tap End night to retry.")
                 return
             }
         }
@@ -904,7 +913,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         UserDefaults.standard.removeObject(forKey: Keys.uploadedExerciseId)
         pendingFetchAvailable = false
         clearError()
-        statusText = "Saved \(exercise.samples.count) raw RR samples. Sensor copy retained."
+        statusText = "Saved \(exercise.samples.count) raw RR samples. Sensor copy retained; tap End night to retry."
     }
 
     private func listExercisesWithTimeout(seconds: UInt64) async throws -> [PolarExerciseEntry] {
@@ -1670,6 +1679,11 @@ final class PolarH10Recorder: NSObject, ObservableObject {
     private func isPftpTimeout(_ error: Error) -> Bool {
         let nsError = error as NSError
         return nsError.domain == "AthleteOSRecorder" && [1004, 1005, 1006, 1007].contains(nsError.code)
+    }
+
+    private func isStoredFetchReconnectFailure(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        return nsError.domain == "AthleteOSRecorder" && [1001, 1002].contains(nsError.code)
     }
 
     private func friendlyError(_ error: Error) -> String {
