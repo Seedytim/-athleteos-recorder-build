@@ -11,12 +11,12 @@
       "iconURL": "https://athleteos-pink-sigma.vercel.app/recorder/icon.png",
       "versions": [
         {
-          "version": "2.1.9",
-          "buildVersion": "26",
-          "date": "2026-10-06T21:18:49Z",
-          "localizedDescription": "Fixes retained-night recovery ordering: reconnects and establishes PS-FTP first, then verifies single-BLE mode, preventing SDK error 2/3 while disconnected before retrying the retained RR fetch. Keeps the H10 sensor copy until AthleteOS verifies upload.",
-          "downloadURL": "https://github.com/Seedytim/-athleteos-recorder-build/releases/download/recorder-v2.1.9-build26/AthleteOSRecorder.ipa",
-          "size": 4152476,
+          "version": "2.2.0",
+          "buildVersion": "27",
+          "date": "2026-10-06T22:48:17Z",
+          "localizedDescription": "Phone-owned live RR, ECG and movement recording with durable local chunks, reconnect recovery and precise packet timing anchors. Keep Bluetooth on and iPhone nearby; missed Bluetooth samples cannot be recovered. End night saves without a sensor fetch. Physical full-night validation remains pending.",
+          "downloadURL": "https://github.com/Seedytim/-athleteos-recorder-build/releases/download/recorder-v2.2.0-build27/AthleteOSRecorder.ipa",
+          "size": 4198165,
           "minOSVersion": "16.0"
         }
       ]
