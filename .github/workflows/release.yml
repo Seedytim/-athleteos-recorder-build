@@ -57,8 +57,8 @@ jobs:
           VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Info.plist")
           BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP/Info.plist")
           echo "Built Recorder version=$VERSION build=$BUILD"
-          test "$VERSION" = "2.1.8"
-          test "$BUILD" = "25"
+          test "$VERSION" = "2.1.9"
+          test "$BUILD" = "26"
 
           # Preserve the existing Home Screen night recorder widget.
           WIDGET="$APP/PlugIns/RecorderWidget.appex"
@@ -176,7 +176,7 @@ jobs:
                       "version": version,
                       "buildVersion": build,
                       "date": date,
-                      "localizedDescription": "Targets Polar H10 PFTP 106 by forcing and verifying single-BLE-connection mode before Start night and before retained RR fetch, then reasserting single mode after any 106 reconnect. Keeps the H10 sensor copy until AthleteOS verifies upload.",
+                      "localizedDescription": "Fixes retained-night recovery ordering: reconnects and establishes PS-FTP first, then verifies single-BLE mode, preventing SDK error 2/3 while disconnected before retrying the retained RR fetch. Keeps the H10 sensor copy until AthleteOS verifies upload.",
                       "downloadURL": download,
                       "size": int(size),
                       "minOSVersion": "16.0",
