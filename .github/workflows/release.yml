@@ -58,7 +58,7 @@ jobs:
           BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP/Info.plist")
           echo "Built Recorder version=$VERSION build=$BUILD"
           test "$VERSION" = "2.1.0"
-          test "$BUILD" = "15"
+          test "$BUILD" = "16"
 
           # Preserve the existing Home Screen night recorder widget.
           WIDGET="$APP/PlugIns/RecorderWidget.appex"
