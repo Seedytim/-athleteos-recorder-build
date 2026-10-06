@@ -188,6 +188,18 @@ struct RecorderRegression {
                      "Polar SDK session-loss errors must trigger explicit session recovery")
         precondition(fetchBody.contains("recoverMissingSdkSessionForStoredFetch()"),
                      "Stored RR fetch must recover a missing Polar SDK session instead of repeating the same failing call")
+        precondition(source.contains("api = Self.makePolarApi()"),
+                     "Persistent Polar error 2/3 must rebuild the Polar BLE API instance")
+        precondition(source.contains("oldApi.cleanup()"),
+                     "Hard session recovery must dispose stale SDK session state")
+        precondition(source.contains("Verifying stored-file access"),
+                     "Hard recovery must verify real stored-file access before declaring success")
+        precondition(source.contains("listExercisesWithTimeout(seconds: 12, identifier: identifier)"),
+                     "Hard recovery must prove sessionFtpClientReady through exercise enumeration")
+        precondition(source.contains("fetchExerciseAcrossKnownSessions"),
+                     "Stored RR read should try both the peripheral UUID and Polar device ID")
+        precondition(source.contains("listExercisesAcrossKnownSessions"),
+                     "Stored exercise lookup should try both known session identifiers")
 
         precondition(source.contains("sdkSessionIdentifier = identifier.address.uuidString"),
                      "Connected peripheral UUID must be captured for stable SDK session lookup")
@@ -208,7 +220,7 @@ struct RecorderRegression {
         precondition(!resetBody.contains("connectionState == .connected && h10RecordingFeatureReady && fileTransferFeatureReady"),
                      "Stopped-file recovery must not require the exercise-recording service callback")
 
-        print("PASS: morning save direct-first + UUID session lookup + Polar error 2/3 recovery + bounded PS-FTP retry")
+        print("PASS: morning save direct-first + dual identifier lookup + hard Polar SDK rebuild + verified PS-FTP recovery")
     }
 
     static func testCleanupJournal(raw: RawH10RRRecording, sha: String, id: String) async throws {
