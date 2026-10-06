@@ -213,12 +213,14 @@ jobs:
           git commit -m "Publish AthleteOS Recorder metadata ${VERSION} (${BUILD})"
           git push origin HEAD:main
 
-          # The production SideStore source is a stable AthleteOS URL that proxies
-          # this Recorder-owned feed. Refuse success until the live source resolves
-          # to the exact immutable artifact that was just validated.
+          # The production SideStore source rewrites the immutable GitHub artifact
+          # through AthleteOS/Vercel to avoid raw.githubusercontent.com socket resets
+          # during iOS installation. Verify that the live feed points to the exact
+          # artifact commit through that proxy.
+          LIVE_DOWNLOAD_URL="https://athleteos-pink-sigma.vercel.app/recorder/AthleteOSRecorder.ipa?artifact=${ARTIFACT_COMMIT}"
           for attempt in 1 2 3 4 5; do
             if curl -fL -H "Cache-Control: no-cache" "${SIDE_SOURCE_URL}?v=${ARTIFACT_COMMIT}" -o /tmp/live-source.json; then
-              if python3 - "$VERSION" "$BUILD" "$SIZE" "$DOWNLOAD_URL" <<'PY'
+              if python3 - "$VERSION" "$BUILD" "$SIZE" "$LIVE_DOWNLOAD_URL" <<'PY'
           import json, sys
           version, build, size, download = sys.argv[1:]
           feed = json.load(open("/tmp/live-source.json"))
@@ -229,7 +231,7 @@ jobs:
           assert v["downloadURL"] == download
           PY
               then
-                echo "Production SideStore source resolves to the validated artifact."
+                echo "Production SideStore source resolves to the validated AthleteOS IPA proxy."
                 exit 0
               fi
             fi
