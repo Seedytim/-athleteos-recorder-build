@@ -1745,8 +1745,8 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         hrFeatureReady = false
 
         statusText = "Polar lost the H10 session. Reconnecting cleanly…"
-        try api.connectToDevice(preferredSdkIdentifier)
         connectionState = .connecting
+        try api.connectToDevice(preferredSdkIdentifier)
 
         for _ in 0..<200 {
             if StoredFetchConnectionPolicy.ready(
