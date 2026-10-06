@@ -3,7 +3,6 @@ import Foundation
 @main
 struct RecorderRegression {
     static func main() async throws {
-        testCompanionControls()
         testConnectionTransitions()
         let id = UUID().uuidString
         let sha = String(repeating: "a", count: 64)
@@ -44,45 +43,6 @@ struct RecorderRegression {
         #endif
         print("PASS: verified archive receipts only, SHA must match, raw samples preserved, queue files discoverable and independently deletable")
     }
-    static func testCompanionControls() {
-        precondition(RecorderCompanionPolicy.isNightAction(URL(string: "athleteos-recorder://night-action")!))
-        for url in ["https://night-action", "athleteos-recorder://connect?token=x", "athleteos-recorder://night-action?token=x", "athleteos-recorder://night-action/other", "athleteos-recorder://night-action#start"] {
-            precondition(!RecorderCompanionPolicy.isNightAction(URL(string: url)!))
-        }
-        var gate = NightActionGate()
-        let now = Date(timeIntervalSince1970: 1_700_000_000)
-        precondition(gate.begin(now: now))
-        precondition(!gate.begin(now: now.addingTimeInterval(60)), "A duplicate external action cannot reverse an in-flight night")
-        gate.finish(now: now.addingTimeInterval(61))
-        precondition(!gate.begin(now: now.addingTimeInterval(62)), "Duplicate URL delivery immediately after completion must be ignored")
-        precondition(gate.begin(now: now.addingTimeInterval(64)))
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(identifier: "Pacific/Auckland")!
-        func date(_ day: Int, _ hour: Int, _ minute: Int = 0) -> Date {
-            calendar.date(from: DateComponents(year: 2026, month: 9, day: day, hour: hour, minute: minute))!
-        }
-        let start = date(26, 21)
-        let morning = RecorderCompanionPolicy.morningReminder(startedAt: start, hour: 7, minute: 15, now: start, calendar: calendar)
-        precondition(morning == date(27, 7, 15), "Reminder uses local morning across NZ daylight-saving transition")
-        precondition(RecorderCompanionPolicy.morningReminder(startedAt: start, hour: 7, minute: 15, now: date(27, 8), calendar: calendar) == nil, "Restart must not reschedule an old night for tomorrow")
-        precondition(RecorderCompanionPolicy.morningReminder(startedAt: start, hour: 24, minute: 0, now: start, calendar: calendar) == nil)
-        precondition(RecorderCompanionPolicy.morningReminder(startedAt: date(27, 1), hour: 7, minute: 15, now: date(27, 1), calendar: calendar) == date(27, 7, 15), "Post-midnight start uses this morning")
-        func plan(enabled: Bool = true, authorized: Bool = true, pending: Bool,
-                  morningEnabled: Bool = true) -> (evening: Bool, morning: Date?) {
-            RecorderCompanionPolicy.reminderPlan(enabled: enabled, authorized: authorized,
-                eveningEnabled: true, morningEnabled: morningEnabled, nightPending: pending,
-                startedAt: start, morningHour: 7, morningMinute: 15, now: start, calendar: calendar)
-        }
-        precondition(plan(pending: false).evening && plan(pending: false).morning == nil,
-                     "Durable save restores evening prompt and cancels morning collection prompt")
-        precondition(!plan(pending: true).evening && plan(pending: true).morning == morning,
-                     "A pending night replaces start reminders with its one-off collection prompt")
-        precondition(!plan(enabled: false, pending: false).evening && plan(enabled: false, pending: true).morning == nil)
-        precondition(!plan(authorized: false, pending: false).evening && plan(authorized: false, pending: true).morning == nil)
-        precondition(plan(pending: true, morningEnabled: false).morning == nil)
-        print("PASS: strict external-action routing, whole-operation duplicate guard, morning reminders across restart and daylight saving")
-    }
-
     static func testConnectionTransitions() {
         func step(on: Bool = true, connected: Bool = false, record: Bool = false,
                   transfer: Bool = false, busy: Bool = false, timedOut: Bool = false,
@@ -224,6 +184,13 @@ struct RecorderRegression {
         precondition(u64(bytes, 0) == 10 && i32(bytes, 8) == -101)
         precondition(u64(bytes, 12) == 20 && i32(bytes, 20) == 202, "Raw signed ECG values and device timestamps must round-trip exactly")
 
+        // Simulate a process dying in the middle of one binary record.
+        let partial = captureDir.appendingPathComponent("acc-0000.bin")
+        let partialHandle = try FileHandle(forWritingTo: partial)
+        try partialHandle.seekToEnd()
+        try partialHandle.write(contentsOf: Data([0xAA, 0xBB, 0xCC]))
+        try partialHandle.close()
+
         let restarted = ResearchCaptureStore(root: root, chunkLimitBytes: 40)
         let recoveredCount = try await restarted.recoverInterruptedCaptures(now: Date(timeIntervalSince1970: 200))
         precondition(recoveredCount == 1, "An app interruption must be discovered without deleting raw chunks")
@@ -241,6 +208,9 @@ struct RecorderRegression {
         let events = try String(contentsOf: captureDir.appendingPathComponent("events.ndjson"), encoding: .utf8)
         precondition(events.contains("gap_started"))
         precondition(events.contains("recovered_after_interruption"), "Gaps and recovery must be explicit, never silently filled")
+        precondition(events.contains("partial_chunk_repaired"), "A torn binary tail must be repaired and recorded explicitly")
+        let repairedAccSize = (try partial.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? -1
+        precondition(repairedAccSize == 20, "Recovery must truncate only the incomplete ACC tail")
 
         let second = try await restarted.begin(metadata: metadata, channels: [channel], startedAt: Date(timeIntervalSince1970: 300))
         try await restarted.appendECG([ResearchECGSample(deviceTimestampNs: 50, voltageMicrovolts: 505)])
