@@ -681,7 +681,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
             await fetchAndSaveStoredRecording(stoppedAt: stoppedAt ?? Date())
         } catch {
             pendingFetchAvailable = true
-            fail("Stop/fetch/save failed: \\(friendlyError(error)). Sensor copy retained; tap End night to retry.")
+            fail("Stop/fetch/save failed: \(friendlyError(error)). Sensor copy retained; tap End night to retry.")
         }
     }
 
@@ -821,8 +821,8 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                         if (isOperationNotPermitted106(error) || isPftpTimeout(error)), attempt < maxAttempts {
                             let delay = retryDelays[min(attempt - 1, retryDelays.count - 1)]
                             statusText = isPftpTimeout(error)
-                                ? "H10 RR read timed out. Resetting connection in \\(delay)s…"
-                                : "H10 refused the direct RR read (Polar 106). Resetting connection in \\(delay)s…"
+                                ? "H10 RR read timed out. Resetting connection in \(delay)s…"
+                                : "H10 refused the direct RR read (Polar 106). Resetting connection in \(delay)s…"
                             try await Task.sleep(for: .seconds(delay))
                             try await resetConnectionForStoredFetch()
                             continue
