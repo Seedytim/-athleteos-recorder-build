@@ -58,7 +58,7 @@ jobs:
           BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP/Info.plist")
           echo "Built Recorder version=$VERSION build=$BUILD"
           test "$VERSION" = "2.2.0"
-          test "$BUILD" = "27"
+          test "$BUILD" = "28"
 
           # Preserve the existing Home Screen night recorder widget.
           WIDGET="$APP/PlugIns/RecorderWidget.appex"
@@ -176,7 +176,7 @@ jobs:
                       "version": version,
                       "buildVersion": build,
                       "date": date,
-                      "localizedDescription": "Phone-owned live RR, ECG and movement recording with durable local chunks, reconnect recovery and precise packet timing anchors. Keep Bluetooth on and iPhone nearby; missed Bluetooth samples cannot be recovered. End night saves without a sensor fetch. Physical full-night validation remains pending.",
+                      "localizedDescription": "Phone-owned live RR and movement recording with durable local chunks, reconnect recovery and precise packet timing anchors. Continuous ECG is not recorded. Keep Bluetooth on and iPhone nearby; missed Bluetooth samples cannot be recovered. End night saves without a sensor fetch. Physical full-night validation remains pending.",
                       "downloadURL": download,
                       "size": int(size),
                       "minOSVersion": "16.0",
