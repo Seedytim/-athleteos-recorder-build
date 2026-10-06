@@ -1,0 +1,25 @@
+{
+  "name": "AthleteOS Recorder",
+  "identifier": "nz.co.athleteos.recorder.source",
+  "sourceURL": "https://athleteos-pink-sigma.vercel.app/recorder/source.json",
+  "apps": [
+    {
+      "name": "AthleteOS Recorder",
+      "bundleIdentifier": "nz.co.athleteos.recorder",
+      "developerName": "AthleteOS",
+      "localizedDescription": "Private Polar H10 overnight RR recorder for AthleteOS.",
+      "iconURL": "https://athleteos-pink-sigma.vercel.app/recorder/icon.png",
+      "versions": [
+        {
+          "version": "2.0.2",
+          "buildVersion": "14",
+          "date": "2026-10-05T22:12:09Z",
+          "localizedDescription": "One-button overnight Recorder with morning check-in reminders, post-run review reminders, widget support, automatic cleanup, and safer recovery behavior.",
+          "downloadURL": "https://raw.githubusercontent.com/Seedytim/-athleteos-recorder-build/c20956ca44e0a4d28d7cf61ac8accc51adbb23e9/dist/AthleteOSRecorder.ipa",
+          "size": 3814321,
+          "minOSVersion": "16.0"
+        }
+      ]
+    }
+  ]
+}
