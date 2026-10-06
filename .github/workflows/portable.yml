@@ -2,9 +2,9 @@ name: Portable Recorder Safety
 on:
   push:
     branches: [main]
-    paths: ["Sources/**","Widget/**","Tests/**",".github/workflows/portable.yml"]
+    paths: ["Sources/**","Tests/**",".github/workflows/portable.yml"]
   pull_request:
-    paths: ["Sources/**","Widget/**","Tests/**"]
+    paths: ["Sources/**","Tests/**"]
 concurrency:
   group: recorder-portable-${{ github.ref }}
   cancel-in-progress: true
@@ -19,7 +19,6 @@ jobs:
       - uses: actions/checkout@v4
       - name: Portable lifecycle and connection regressions
         run: |
-          swiftc Sources/RecorderCompanionPolicy.swift Sources/NightConnectionPolicy.swift Sources/RecordingModels.swift Sources/RecordingStore.swift Sources/UploadReceipt.swift Tests/RecorderRegression.swift -o /tmp/recorder-regression
+          swiftc Sources/NightConnectionPolicy.swift Sources/RecordingModels.swift Sources/RecordingStore.swift Sources/ResearchCaptureStore.swift Sources/UploadReceipt.swift Tests/RecorderRegression.swift -o /tmp/recorder-regression
           /tmp/recorder-regression
           swiftc -frontend -parse Sources/*.swift Tests/RecorderRegression.swift
-          swiftc -frontend -parse Widget/*.swift
