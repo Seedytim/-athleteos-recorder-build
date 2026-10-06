@@ -85,6 +85,21 @@ struct ResearchCaptureSummary: Sendable, Equatable {
     let fileCount: Int
 }
 
+struct ResearchArchiveFile: Sendable, Equatable {
+    let fileName: String
+    let url: URL
+    let channel: String?
+    let recordEncoding: String?
+    let byteCount: UInt64
+}
+
+struct ResearchCaptureArchive: Sendable, Equatable {
+    let captureId: UUID
+    let directory: URL
+    let manifest: ResearchCaptureManifest
+    let files: [ResearchArchiveFile]
+}
+
 actor ResearchCaptureStore {
     static let shared = ResearchCaptureStore()
 
@@ -123,7 +138,7 @@ actor ResearchCaptureStore {
     private let chunkLimitBytes: UInt64
     private var active: ActiveCapture?
 
-    init(root: URL? = nil, chunkLimitBytes: UInt64 = 16 * 1024 * 1024) {
+    init(root: URL? = nil, chunkLimitBytes: UInt64 = 6 * 1024 * 1024) {
         self.root = root
         self.chunkLimitBytes = chunkLimitBytes
     }
@@ -352,6 +367,104 @@ actor ResearchCaptureStore {
             totalBytes: total,
             fileCount: capture.manifest.files.count
         )
+    }
+
+
+    func pendingArchives() throws -> [ResearchCaptureArchive] {
+        let root = try capturesDirectory()
+        guard FileManager.default.fileExists(atPath: root.path) else { return [] }
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        var result: [ResearchCaptureArchive] = []
+
+        for directory in try FileManager.default.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            let values = try directory.resourceValues(forKeys: [.isDirectoryKey])
+            guard values.isDirectory == true else { continue }
+
+            let manifestURL = directory.appendingPathComponent("manifest.json")
+            guard FileManager.default.fileExists(atPath: manifestURL.path) else { continue }
+            let manifest = try decoder.decode(ResearchCaptureManifest.self, from: Data(contentsOf: manifestURL))
+            guard manifest.state != "recording" else { continue }
+            if active?.manifest.captureId == manifest.captureId { continue }
+
+            let described = Dictionary(uniqueKeysWithValues: manifest.files.map { ($0.fileName, $0) })
+            var files: [ResearchArchiveFile] = []
+
+            for url in try FileManager.default.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+                options: [.skipsHiddenFiles]
+            ) {
+                let resource = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+                guard resource.isRegularFile == true else { continue }
+                let name = url.lastPathComponent
+                let descriptor = described[name]
+                let channel: String?
+                let encoding: String?
+                if name == "manifest.json" {
+                    channel = "manifest"
+                    encoding = "json:ResearchCaptureManifest"
+                } else if name == "events.ndjson" {
+                    channel = "events"
+                    encoding = "ndjson:ResearchCaptureEvent"
+                } else {
+                    channel = descriptor?.channel
+                    encoding = descriptor?.recordEncoding
+                }
+                files.append(
+                    ResearchArchiveFile(
+                        fileName: name,
+                        url: url,
+                        channel: channel,
+                        recordEncoding: encoding,
+                        byteCount: UInt64(resource.fileSize ?? 0)
+                    )
+                )
+            }
+
+            guard !files.isEmpty else { continue }
+            result.append(
+                ResearchCaptureArchive(
+                    captureId: manifest.captureId,
+                    directory: directory,
+                    manifest: manifest,
+                    files: files.sorted { $0.fileName < $1.fileName }
+                )
+            )
+        }
+
+        return result.sorted {
+            if $0.manifest.startedAt == $1.manifest.startedAt {
+                return $0.captureId.uuidString < $1.captureId.uuidString
+            }
+            return $0.manifest.startedAt < $1.manifest.startedAt
+        }
+    }
+
+    func deleteVerifiedArchive(_ archive: ResearchCaptureArchive) throws {
+        let root = try capturesDirectory().standardizedFileURL
+        let directory = archive.directory.standardizedFileURL
+        guard directory.deletingLastPathComponent() == root else {
+            throw StoreError.invalidManifest
+        }
+
+        let manifestURL = directory.appendingPathComponent("manifest.json")
+        guard FileManager.default.fileExists(atPath: manifestURL.path) else {
+            throw StoreError.invalidManifest
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let manifest = try decoder.decode(ResearchCaptureManifest.self, from: Data(contentsOf: manifestURL))
+        guard manifest.captureId == archive.captureId, manifest.state != "recording" else {
+            throw StoreError.invalidManifest
+        }
+
+        try FileManager.default.removeItem(at: directory)
     }
 
     private func appendBinary(
