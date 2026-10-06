@@ -2,7 +2,7 @@
 
 ## Phone-owned live recording (unreleased)
 
-ECG/ACC preserve raw sensor nanoseconds unchanged. Each packet also records exact
+ACC preserves raw sensor nanoseconds unchanged. Each packet also records exact
 nanoseconds as strings, precise host receipt milliseconds, monotonic uptime,
 packet bounds and a reconnect segment ID. Receipt time references the LAST
 sample, not the first. This is a Bluetooth receipt estimate, not hardware clock
@@ -10,25 +10,29 @@ synchronization. The backend isolates capture clocks, refuses reset/clock-step
 anchors and never invents a clock origin when anchors are missing. Old archives
 retain their original lower-precision anchors; they are not retroactively fixed.
 
-New nights stream RR through the Bluetooth Heart Rate Service alongside ECG and
-accelerometer data. All three channels must produce fresh packets before the UI
-claims a healthy recording. No H10 exercise is started, fetched, or deleted by
-the new night action. Old sensor recordings remain in the explicit legacy
-recovery path; installing this change does not erase them.
+New nights stream RR through the Bluetooth Heart Rate Service alongside
+accelerometer data. RR and ACC must both produce fresh packets before the UI
+claims a healthy recording. Continuous ECG is intentionally not started: the
+recovery engine uses RR for beat-to-beat timing and ACC for movement/stillness,
+so full-night ECG added substantial storage without contributing to current
+readiness processing. Legacy ECG archive support is retained so older captures
+remain readable. No H10 exercise is started, fetched, or deleted by the new night
+action. Old sensor recordings remain in the explicit legacy recovery path;
+installing this change does not erase them.
 
 RR notifications, receipt times and contact flags are saved in bounded local
-chunks. ECG/ACC and HR writes are flushed at most approximately every five
-seconds or 64 KiB. End night works without a Bluetooth connection and creates a
-stable schema-2 RR export containing every interrupted segment for that night.
-Upload retries are idempotent and local deletion requires exact SHA receipts.
-The companion backend schema-2 parser must deploy before releasing this app.
+chunks. ACC and HR writes are flushed at most approximately every five seconds
+or 64 KiB. End night works without a Bluetooth connection and creates a stable
+schema-2 RR export containing every interrupted segment for that night. Upload
+retries are idempotent and local deletion requires exact SHA receipts. The
+companion backend schema-2 parser must deploy before releasing this app.
 
 Keep Bluetooth on, the phone nearby, and Recorder running (screen lock is fine;
 do not force-quit). A lost BLE connection, phone shutdown, or terminated process
 can lose new samples. Received durable chunks survive; missed samples cannot be
 recovered without sensor buffering. The app reconnects where iOS permits it and
 does not fabricate coverage. Live RR beat times are estimates anchored to host
-notification receipt, not device-timestamped ECG R peaks.
+notification receipt rather than a separate raw ECG waveform.
 
 Acceptance gate: locked-screen capture, a 20-second BLE interruption, app
 termination/relaunch, End with BLE off, offline upload/retry, and one full-night
