@@ -1747,30 +1747,65 @@ final class PolarH10Recorder: NSObject, ObservableObject {
     }
 
     private func recoverMissingSdkSessionForStoredFetch() async throws {
-        // Polar error 2/3 means the SDK cannot resolve an open GATT session even
-        // if our last observer callback still says Connected. Treat the local state
-        // as stale, reconnect, then wait beyond feature-ready for the SDK session map
-        // and encrypted GATT link to settle.
+        // Polar error 2/3 means sessionFtpClientReady() cannot find an open
+        // BleDeviceSession in the SDK listener's allSessions table. Build 22 proved
+        // that a disconnect/reconnect alone can still leave that table stale.
+        // Rebuild the Polar API instance, reconnect, then prove stored-file access
+        // with listExercises() before returning.
         preparationTask?.cancel()
-        try? api.disconnectFromDevice(preferredSdkIdentifier)
+        scanTask?.cancel()
+        researchReconnectTask?.cancel()
+
+        let oldApi = api
+        for identifier in storedFetchIdentifiers {
+            try? oldApi.disconnectFromDevice(identifier)
+        }
+        oldApi.cleanup()
+
         connectionState = .disconnected
         h10RecordingFeatureReady = false
         fileTransferFeatureReady = false
         onlineStreamingFeatureReady = false
         hrFeatureReady = false
 
-        statusText = "Polar lost the H10 session. Reconnecting cleanly…"
-        connectionState = .connecting
-        try api.connectToDevice(preferredSdkIdentifier)
+        statusText = "Polar lost its H10 session. Rebuilding Bluetooth session…"
+        api = Self.makePolarApi()
+        configureApi(api)
+        bluetoothOn = api.isBlePowered
 
-        for _ in 0..<200 {
+        let reconnectId = deviceId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? preferredSdkIdentifier
+            : deviceId
+        guard !reconnectId.isEmpty else {
+            throw NSError(
+                domain: "AthleteOSRecorder",
+                code: 1012,
+                userInfo: [NSLocalizedDescriptionKey: "No saved H10 identifier is available for session recovery."]
+            )
+        }
+
+        connectionState = .connecting
+        try api.connectToDevice(reconnectId)
+
+        for _ in 0..<250 {
             if StoredFetchConnectionPolicy.ready(
                 connected: connectionState == .connected,
                 transferReady: fileTransferFeatureReady
             ) {
-                statusText = "H10 session restored. Settling file transfer…"
+                statusText = "Fresh H10 session connected. Verifying stored-file access…"
                 try await Task.sleep(for: .seconds(2))
-                return
+
+                var lastProbeError: Error?
+                for identifier in storedFetchIdentifiers {
+                    do {
+                        _ = try await listExercisesWithTimeout(seconds: 12, identifier: identifier)
+                        statusText = "H10 stored-file session verified."
+                        return
+                    } catch {
+                        lastProbeError = error
+                    }
+                }
+                if let lastProbeError { throw lastProbeError }
             }
             try await Task.sleep(for: .milliseconds(100))
         }
@@ -1778,7 +1813,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         throw NSError(
             domain: "AthleteOSRecorder",
             code: 1011,
-            userInfo: [NSLocalizedDescriptionKey: "Polar SDK could not restore the H10 file-transfer session."]
+            userInfo: [NSLocalizedDescriptionKey: "Polar SDK could not rebuild a usable H10 stored-file session."]
         )
     }
 
