@@ -53,6 +53,7 @@ jobs:
           test -d "$APP"
           VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Info.plist")
           BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP/Info.plist")
+          echo "Built Recorder version=$VERSION build=$BUILD"
           test "$VERSION" = "2.1.0"
           test "$BUILD" = "15"
 
@@ -63,17 +64,19 @@ jobs:
             exit 1
           fi
 
-          # The asset catalog and a compiled AppIcon must exist in the actual device build.
-          test -s "$APP/Assets.car"
-          /usr/bin/assetutil --info "$APP/Assets.car" > /tmp/assets.json
-          grep -q '"Name" : "AppIcon"' /tmp/assets.json || {
-            echo "Compiled AppIcon was not found in Assets.car"
-            cat /tmp/assets.json
-            exit 1
-          }
+          # Validate the icon the way iOS consumes it: Info.plist must reference a
+          # compiled primary icon and the build must contain the generated icon PNGs.
+          ICON_BASE=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles:0" "$APP/Info.plist")
+          echo "Compiled primary icon base=$ICON_BASE"
+          test -n "$ICON_BASE"
+          ICON_COUNT=$(find "$APP" -maxdepth 1 -type f \( -name "${ICON_BASE}*.png" -o -name 'AppIcon*.png' \) | wc -l | tr -d ' ')
+          echo "Compiled Home Screen icon files=$ICON_COUNT"
+          test "$ICON_COUNT" -ge 1
 
           # Background BLE is required for locked-phone streaming.
-          /usr/libexec/PlistBuddy -c "Print :UIBackgroundModes:0" "$APP/Info.plist" | grep -qx "bluetooth-central"
+          BG=$(/usr/libexec/PlistBuddy -c "Print :UIBackgroundModes:0" "$APP/Info.plist")
+          echo "Background mode=$BG"
+          test "$BG" = "bluetooth-central"
 
       - name: Package unsigned IPA
         run: |
