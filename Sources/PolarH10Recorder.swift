@@ -82,7 +82,16 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         return value.isEmpty ? deviceId : value
     }
 
-    private lazy var api: PolarBleApi = {
+    private var storedFetchIdentifiers: [String] {
+        var ids: [String] = []
+        for raw in [preferredSdkIdentifier, deviceId] {
+            let id = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !id.isEmpty && !ids.contains(id) { ids.append(id) }
+        }
+        return ids
+    }
+
+    private static func makePolarApi() -> PolarBleApi {
         PolarBleApiDefaultImpl.polarImplementation(
             DispatchQueue.main,
             features: [
@@ -96,7 +105,17 @@ final class PolarH10Recorder: NSObject, ObservableObject {
             ],
             restoreIdentifier: "nz.co.athleteos.recorder.polar"
         )
-    }()
+    }
+
+    private lazy var api: PolarBleApi = Self.makePolarApi()
+
+    private func configureApi(_ candidate: PolarBleApi) {
+        candidate.observer = self
+        candidate.powerStateObserver = self
+        candidate.deviceFeaturesObserver = self
+        candidate.deviceInfoObserver = self
+        candidate.polarFilter(true)
+    }
 
     private enum Keys {
         static let deviceId = "h10.deviceId"
@@ -146,11 +165,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         }
         #endif
 
-        api.observer = self
-        api.powerStateObserver = self
-        api.deviceFeaturesObserver = self
-        api.deviceInfoObserver = self
-        api.polarFilter(true)
+        configureApi(api)
         bluetoothOn = api.isBlePowered
 
         Task { [researchStore] in
