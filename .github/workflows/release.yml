@@ -57,8 +57,8 @@ jobs:
           VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Info.plist")
           BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP/Info.plist")
           echo "Built Recorder version=$VERSION build=$BUILD"
-          test "$VERSION" = "2.1.6"
-          test "$BUILD" = "23"
+          test "$VERSION" = "2.1.7"
+          test "$BUILD" = "24"
 
           # Preserve the existing Home Screen night recorder widget.
           WIDGET="$APP/PlugIns/RecorderWidget.appex"
@@ -102,9 +102,10 @@ jobs:
           zip -qry AthleteOSRecorder.ipa Payload
           test -s AthleteOSRecorder.ipa
 
-      - name: Publish immutable artifact then SideStore metadata
+      - name: Publish GitHub Release IPA then SideStore metadata
         env:
           REPO: Seedytim/-athleteos-recorder-build
+          GH_TOKEN: ${{ github.token }}
           SIDE_SOURCE_URL: https://athleteos-pink-sigma.vercel.app/recorder/source.json
           SIDE_ICON_URL: https://athleteos-pink-sigma.vercel.app/recorder/icon.png
         run: |
@@ -117,6 +118,8 @@ jobs:
           SHA256=$(shasum -a 256 AthleteOSRecorder.ipa | awk '{print $1}')
           DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
           SOURCE=$(git rev-parse HEAD)
+          TAG="recorder-v${VERSION}-build${BUILD}"
+          DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${TAG}/AthleteOSRecorder.ipa"
 
           git config user.name "Seedytim"
           git config user.email "103544048+Seedytim@users.noreply.github.com"
@@ -126,38 +129,37 @@ jobs:
             exit 1
           fi
 
-          mkdir -p dist
-          cp AthleteOSRecorder.ipa dist/AthleteOSRecorder.ipa
-
-          # Commit and publish the binary FIRST. SideStore metadata is not changed yet.
-          git add dist/AthleteOSRecorder.ipa
-          if git diff --cached --quiet; then
-            echo "Release IPA did not change; refusing ambiguous publication."
-            exit 1
+          # Publish the exact validated IPA as a native GitHub Release asset.
+          # This avoids raw.githubusercontent.com socket resets and avoids any
+          # binary proxy transforming or confusing SideStore's bundle inspection.
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" AthleteOSRecorder.ipa#AthleteOSRecorder.ipa --repo "$REPO" --clobber
+          else
+            gh release create "$TAG" AthleteOSRecorder.ipa#AthleteOSRecorder.ipa \
+              --repo "$REPO" \
+              --title "AthleteOS Recorder ${VERSION} (${BUILD})" \
+              --notes "SideStore release for AthleteOS Recorder ${VERSION} build ${BUILD}."
           fi
-          git commit -m "Publish AthleteOS Recorder artifact ${VERSION} (${BUILD})"
-          ARTIFACT_COMMIT=$(git rev-parse HEAD)
-          git push origin HEAD:main
 
-          DOWNLOAD_URL="https://raw.githubusercontent.com/${REPO}/${ARTIFACT_COMMIT}/dist/AthleteOSRecorder.ipa"
-
-          # Prove the immutable URL serves the exact IPA before feed publication.
-          curl -fL --retry 4 --retry-delay 2 "$DOWNLOAD_URL" -o /tmp/immutable.ipa
-          REMOTE_SIZE=$(stat -f%z /tmp/immutable.ipa)
-          REMOTE_SHA=$(shasum -a 256 /tmp/immutable.ipa | awk '{print $1}')
+          # Prove the release CDN serves byte-for-byte the IPA that passed bundle
+          # validation before the SideStore feed can advertise it.
+          curl -fL --retry 5 --retry-all-errors --retry-delay 2 "$DOWNLOAD_URL" -o /tmp/release.ipa
+          REMOTE_SIZE=$(stat -f%z /tmp/release.ipa)
+          REMOTE_SHA=$(shasum -a 256 /tmp/release.ipa | awk '{print $1}')
           test "$REMOTE_SIZE" = "$SIZE"
           test "$REMOTE_SHA" = "$SHA256"
 
-          python3 - "$VERSION" "$BUILD" "$SIZE" "$SHA256" "$SOURCE" "$ARTIFACT_COMMIT" "$DOWNLOAD_URL" "$DATE" "$SIDE_SOURCE_URL" "$SIDE_ICON_URL" <<'PY'
+          mkdir -p dist
+          python3 - "$VERSION" "$BUILD" "$SIZE" "$SHA256" "$SOURCE" "$TAG" "$DOWNLOAD_URL" "$DATE" "$SIDE_SOURCE_URL" "$SIDE_ICON_URL" <<'PY'
           import json, sys
-          version, build, size, sha256, source, artifact, download, date, source_url, icon_url = sys.argv[1:]
+          version, build, size, sha256, source, tag, download, date, source_url, icon_url = sys.argv[1:]
           build_meta = {
               "version": version,
               "build": build,
               "size": int(size),
               "sha256": sha256,
               "source_commit": source,
-              "artifact_commit": artifact,
+              "release_tag": tag,
               "download_url": download,
           }
           feed = {
@@ -174,7 +176,7 @@ jobs:
                       "version": version,
                       "buildVersion": build,
                       "date": date,
-                      "localizedDescription": "Hardens morning RR recovery for persistent Polar SDK error 2/3 by rebuilding the Polar BLE API session, reconnecting from clean SDK state, verifying stored-file access, and trying both the H10 peripheral UUID and Polar device ID before fetch. Sensor data remains retained until AthleteOS verifies upload.",
+                      "localizedDescription": "Hardens morning RR recovery for persistent Polar SDK error 2/3 by rebuilding the Polar BLE API session, reconnecting from clean SDK state, verifying stored-file access, and trying both the H10 peripheral UUID and Polar device ID before fetch. Delivered through a verified GitHub Release asset.",
                       "downloadURL": download,
                       "size": int(size),
                       "minOSVersion": "16.0",
@@ -189,7 +191,7 @@ jobs:
               f.write("\n")
           PY
 
-          # Feed must agree with the artifact metadata exactly.
+          # Cross-check feed metadata against the exact release asset again.
           python3 - "$VERSION" "$BUILD" "$SIZE" "$SHA256" "$DOWNLOAD_URL" <<'PY'
           import hashlib, json, sys, urllib.request
           version, build, size, sha256, expected_url = sys.argv[1:]
@@ -201,41 +203,46 @@ jobs:
           assert int(meta["size"]) == int(size) == int(v["size"])
           assert meta["sha256"] == sha256
           assert meta["download_url"] == expected_url == v["downloadURL"]
-          with urllib.request.urlopen(expected_url, timeout=60) as r:
+          with urllib.request.urlopen(expected_url, timeout=90) as r:
               data = r.read()
           assert len(data) == int(size)
           assert hashlib.sha256(data).hexdigest() == sha256
-          print("SideStore metadata and immutable IPA agree.")
+          print("SideStore metadata and GitHub Release IPA agree byte-for-byte.")
           PY
 
-          # Only after all validation passes is the feed metadata published.
+          # Publish metadata only after the release asset is verified.
           git add dist/build.json dist/source.json
           git commit -m "Publish AthleteOS Recorder metadata ${VERSION} (${BUILD})"
           git push origin HEAD:main
 
-          # The production SideStore source rewrites the immutable GitHub artifact
-          # through AthleteOS/Vercel to avoid raw.githubusercontent.com socket resets
-          # during iOS installation. Verify that the live feed points to the exact
-          # artifact commit through that proxy.
-          LIVE_DOWNLOAD_URL="https://athleteos-pink-sigma.vercel.app/recorder/AthleteOSRecorder.ipa?artifact=${ARTIFACT_COMMIT}"
-          for attempt in 1 2 3 4 5; do
-            if curl -fL -H "Cache-Control: no-cache" "${SIDE_SOURCE_URL}?v=${ARTIFACT_COMMIT}" -o /tmp/live-source.json; then
-              if python3 - "$VERSION" "$BUILD" "$SIZE" "$LIVE_DOWNLOAD_URL" <<'PY'
+          # Verify the production SideStore source converges to the same direct
+          # GitHub Release asset, then download through the exact URL SideStore sees
+          # and re-check bytes one final time.
+          for attempt in 1 2 3 4 5 6 7 8; do
+            if curl -fL -H "Cache-Control: no-cache" "${SIDE_SOURCE_URL}?v=${SOURCE}-${BUILD}-${attempt}" -o /tmp/live-source.json; then
+              LIVE_DOWNLOAD=$(python3 - "$VERSION" "$BUILD" "$SIZE" "$DOWNLOAD_URL" <<'PY'
           import json, sys
-          version, build, size, download = sys.argv[1:]
+          version, build, size, expected = sys.argv[1:]
           feed = json.load(open("/tmp/live-source.json"))
           v = feed["apps"][0]["versions"][0]
           assert v["version"] == version
           assert str(v["buildVersion"]) == str(build)
           assert int(v["size"]) == int(size)
-          assert v["downloadURL"] == download
+          assert v["downloadURL"] == expected
+          print(v["downloadURL"])
           PY
-              then
-                echo "Production SideStore source resolves to the validated AthleteOS IPA proxy."
+              ) || true
+              if [ "$LIVE_DOWNLOAD" = "$DOWNLOAD_URL" ]; then
+                curl -fL --retry 5 --retry-all-errors --retry-delay 2 "$LIVE_DOWNLOAD" -o /tmp/live.ipa
+                LIVE_SIZE=$(stat -f%z /tmp/live.ipa)
+                LIVE_SHA=$(shasum -a 256 /tmp/live.ipa | awk '{print $1}')
+                test "$LIVE_SIZE" = "$SIZE"
+                test "$LIVE_SHA" = "$SHA256"
+                echo "Production SideStore feed and downloaded IPA are verified byte-for-byte."
                 exit 0
               fi
             fi
-            sleep 3
+            sleep 4
           done
-          echo "Production SideStore source did not converge to the published artifact."
+          echo "Production SideStore source did not converge to the GitHub Release artifact."
           exit 1
