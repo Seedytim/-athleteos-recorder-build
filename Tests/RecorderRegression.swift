@@ -4,6 +4,7 @@ import Foundation
 struct RecorderRegression {
     static func main() async throws {
         testConnectionTransitions()
+        try testMorningSaveSourceInvariants()
         testStreamHealthPolicy()
         let id = UUID().uuidString
         let sha = String(repeating: "a", count: 64)
@@ -157,6 +158,44 @@ struct RecorderRegression {
         precondition(NightActionPolicy.afterRecovery(requestedEnd: false, recordingOngoing: false, pendingFetch: false) == .start)
         precondition(NightActionPolicy.afterRecovery(requestedEnd: false, recordingOngoing: true, pendingFetch: false) == .end)
         print("PASS: disconnected connection ownership, both services required, PFTP arbitration, bounded reconnect, Bluetooth loss")
+    }
+
+    static func testMorningSaveSourceInvariants() throws {
+        let source = try String(contentsOfFile: "Sources/PolarH10Recorder.swift", encoding: .utf8)
+
+        guard let stopStart = source.range(of: "func stopFetchAndSave() async {"),
+              let retryStart = source.range(of: "func retryFetchAndSave() async {", range: stopStart.upperBound..<source.endIndex) else {
+            preconditionFailure("Morning save functions must remain discoverable")
+        }
+        let stopBody = String(source[stopStart.lowerBound..<retryStart.lowerBound])
+        precondition(stopBody.contains("await fetchAndSaveStoredRecording"),
+                     "End night must attempt the stored RR read")
+        precondition(!stopBody.contains("try await resetConnectionForStoredFetch()"),
+                     "Normal End night must not force a reconnect before its first stored RR read")
+
+        guard let fetchStart = source.range(of: "private func fetchAndSaveStoredRecording"),
+              let persistStart = source.range(of: "private func persistFetchedExercise", range: fetchStart.upperBound..<source.endIndex) else {
+            preconditionFailure("Stored fetch implementation must remain discoverable")
+        }
+        let fetchBody = String(source[fetchStart.lowerBound..<persistStart.lowerBound])
+        precondition(fetchBody.contains("let maxAttempts = 3"),
+                     "Morning fetch retries must stay bounded")
+        precondition(fetchBody.contains("fetchExerciseWithTimeout(directEntry, seconds: 60)"),
+                     "Direct H10 RR read must not regress to a multi-minute per-attempt timeout")
+        precondition(fetchBody.contains("try await resetConnectionForStoredFetch()"),
+                     "Reconnect must remain available as recovery after an actual read failure")
+
+        guard let resetStart = source.range(of: "private func resetConnectionForStoredFetch() async throws {"),
+              let fetchRange = source.range(of: "private func fetchAndSaveStoredRecording", range: resetStart.upperBound..<source.endIndex) else {
+            preconditionFailure("Stored reconnect implementation must remain discoverable")
+        }
+        let resetBody = String(source[resetStart.lowerBound..<fetchRange.lowerBound])
+        precondition(resetBody.contains("StoredFetchConnectionPolicy.ready"),
+                     "Stopped-file recovery should gate on PS-FTP readiness")
+        precondition(!resetBody.contains("connectionState == .connected && h10RecordingFeatureReady && fileTransferFeatureReady"),
+                     "Stopped-file recovery must not require the exercise-recording service callback")
+
+        print("PASS: morning save is direct-first, reconnect is recovery-only, PS-FTP-only readiness, bounded read time")
     }
 
     static func testCleanupJournal(raw: RawH10RRRecording, sha: String, id: String) async throws {
