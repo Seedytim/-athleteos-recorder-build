@@ -203,7 +203,7 @@ final class AthleteOSUploader: ObservableObject {
         }
 
         busy = true
-        statusText = "Archiving raw ECG and motion in AthleteOS…"
+        statusText = "Archiving raw sensor data in AthleteOS…"
         defer { busy = false }
 
         do {
@@ -346,7 +346,7 @@ final class AthleteOSUploader: ObservableObject {
             }
 
             isConnected = true
-            statusText = "Raw ECG and motion archived and verified in AthleteOS."
+            statusText = "Raw sensor data archived and verified in AthleteOS."
             return receipt
         } catch {
             statusText = "Raw stream archive failed: \(friendly(error)). Local raw data is retained."

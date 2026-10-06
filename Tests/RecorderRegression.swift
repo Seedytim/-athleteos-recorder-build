@@ -93,6 +93,7 @@ struct RecorderRegression {
         let end = source.range(of: "func recoverLegacySensorNight() async {", range: begin.upperBound..<source.endIndex)!
         let phonePath = String(source[begin.lowerBound..<end.lowerBound])
         precondition(!phonePath.contains("api.startRecording") && !phonePath.contains("requestRecordingStatus") && !phonePath.contains("fetchExercise"), "New phone path must not depend on H10 memory")
+        precondition(!source.contains("startEcgStreaming") && !source.contains("requestStreamSettings(sensorId, feature: .ecg)"), "Overnight recovery capture must remain RR + ACC only; continuous ECG must not restart")
         precondition(phonePath.contains("if phoneNightPending { await finishPhoneNight(); return }"), "End must precede Bluetooth readiness checks")
         print("PASS: phone RR chunks, interrupted segments, raw values, explicit gaps, stable export identity, no sensor cleanup or PFTP dependence")
     }

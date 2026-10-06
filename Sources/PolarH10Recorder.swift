@@ -59,13 +59,14 @@ final class PolarH10Recorder: NSObject, ObservableObject {
 
     private let store = RecordingStore.shared
     private let researchStore = ResearchCaptureStore.shared
+    // Overnight recovery capture is RR + ACC only. Continuous ECG was removed
+    // because the recovery engine does not consume it and it dominates storage.
+    // ResearchCaptureStore still reads legacy ECG archives for backward compatibility.
     private var storedExerciseEntry: PolarExerciseEntry?
-    private var ecgStreamTask: Task<Void, Never>?
     private var accStreamTask: Task<Void, Never>?
     private var hrStreamTask: Task<Void, Never>?
     private var researchReconnectTask: Task<Void, Never>?
     private var streamWatchdogTask: Task<Void, Never>?
-    private var ecgStreamRunning = false
     private var accStreamRunning = false
     private var hrStreamRunning = false
     private var researchStartInProgress = false
@@ -75,7 +76,6 @@ final class PolarH10Recorder: NSObject, ObservableObject {
     private var lastPacketAt: [String: Date] = [:]
     private var lastRawSizeRefreshAt: Date?
     private var consecutivePMDRestartFailures = 0
-    private var lastECGAnchorAt: Date?
     private var lastACCAnchorAt: Date?
     private var rawCaptureExpected = false
     private var scanTask: Task<Void, Never>?
@@ -195,7 +195,6 @@ final class PolarH10Recorder: NSObject, ObservableObject {
     deinit {
         preparationTask?.cancel()
         scanTask?.cancel()
-        ecgStreamTask?.cancel()
         accStreamTask?.cancel()
         hrStreamTask?.cancel()
         researchReconnectTask?.cancel()
@@ -322,7 +321,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
             do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
         }
         guard phoneStreamsReady else {
-            fail("Live RR/ECG/movement services did not become ready. Reconnect and try again; no night has started.")
+            fail("Live RR/movement services did not become ready. Reconnect and try again; no night has started.")
             return
         }
         do {
@@ -340,7 +339,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
             phoneMode = true
             lastSavedFile = nil
             athleteOSUploadConfirmed = false
-            statusText = "Starting live RR + ECG + movement on this iPhone…"
+            statusText = "Starting live RR + movement on this iPhone…"
             let metadata = ResearchDeviceMetadata(deviceId: deviceId, model: "Polar H10",
                 firmwareVersion: firmwareVersion, polarSdkVersion: PolarBleApiDefaultImpl.versionInfo(),
                 appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "",
@@ -375,7 +374,6 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         researchReconnectTask?.cancel()
         researchReconnectTask = nil
         streamWatchdogTask?.cancel()
-        ecgStreamTask?.cancel()
         accStreamTask?.cancel()
         hrStreamTask?.cancel()
         rawStreamActive = false
@@ -399,7 +397,6 @@ final class PolarH10Recorder: NSObject, ObservableObject {
             rawStreamStatus = "Saved on iPhone"
             statusText = "Night saved locally. Upload will retry; no H10 memory transfer is needed."
         } catch { fail("End night could not finalize local files: \(error.localizedDescription). Files retained; tap End night to retry.") }
-        ecgStreamRunning = false
         accStreamRunning = false
         hrStreamRunning = false
         // Cancelling subscriptions ends live streams. Explicit SDK stop requests
@@ -645,8 +642,8 @@ final class PolarH10Recorder: NSObject, ObservableObject {
 
     var preparationMessage: String {
         if phoneMode {
-            return phoneStreamsReady ? "Live RR/ECG/movement services ready."
-                : "Waiting for live RR/ECG/movement services; H10 file transfer is not required."
+            return phoneStreamsReady ? "Live RR/movement services ready."
+                : "Waiting for live RR/movement services; H10 file transfer is not required."
         }
         if h10RecordingFeatureReady && fileTransferFeatureReady { return "H10 services are ready." }
         let service = !h10RecordingFeatureReady ? "recording service" : "file-transfer service"
@@ -801,8 +798,8 @@ final class PolarH10Recorder: NSObject, ObservableObject {
 
             if rawStreamActive || streamAttemptActive {
                 statusText = rawStreamActive
-                    ? "Recording raw RR + ECG + accelerometer."
-                    : "Raw RR is safe. Confirming ECG + accelerometer packets…"
+                    ? "Recording raw RR + accelerometer."
+                    : "Raw RR is safe. Confirming accelerometer packets…"
             } else {
                 statusText = "H10 raw RR is safe. High-resolution stream is unavailable; the safety recording continues."
             }
@@ -1346,24 +1343,10 @@ final class PolarH10Recorder: NSObject, ObservableObject {
             let sensorId = deviceId
             let available = try await boundedSensorOperation { try await sensorAPI.getAvailableOnlineStreamDataTypes(sensorId) }
             var descriptors: [ResearchChannelDescriptor] = []
-            var ecgSetting: PolarSensorSetting?
             var accSetting: PolarSensorSetting?
 
-            if available.contains(.ecg) {
-                let supported = try await boundedSensorOperation { try await sensorAPI.requestStreamSettings(sensorId, feature: .ecg) }
-                let selected = supported.maxSettings()
-                ecgSetting = selected
-                descriptors.append(
-                    channelDescriptor(
-                        channel: "ecg",
-                        source: "Polar H10 PMD",
-                        unit: "microvolt",
-                        encoding: "little_endian:uint64_timestamp_ns,int32_microvolts",
-                        supported: supported,
-                        selected: selected
-                    )
-                )
-            }
+            // Continuous ECG is intentionally not started for overnight recovery capture.
+            // RR provides beat-to-beat timing; ACC provides movement/stillness context.
 
             if available.contains(.acc) {
                 let supported = try await boundedSensorOperation { try await sensorAPI.requestStreamSettings(sensorId, feature: .acc) }
@@ -1396,13 +1379,13 @@ final class PolarH10Recorder: NSObject, ObservableObject {
             }
 
             guard !descriptors.isEmpty else {
-                rawStreamStatus = "RR only · ECG/accelerometer not advertised"
+                rawStreamStatus = "RR only · accelerometer not advertised"
                 rawStreamActive = false
                 return
             }
 
-            if phoneMode && (ecgSetting == nil || accSetting == nil || !hrFeatureReady) {
-                throw NSError(domain: "AthleteOSRecorder", code: 1200, userInfo: [NSLocalizedDescriptionKey: "RR, ECG and movement must all be available for a phone-owned night."])
+            if phoneMode && (accSetting == nil || !hrFeatureReady) {
+                throw NSError(domain: "AthleteOSRecorder", code: 1200, userInfo: [NSLocalizedDescriptionKey: "RR and movement must both be available for a phone-owned night."])
             }
             guard rawCaptureExpected, recordingOngoing, captureEpisodeId == exerciseId else { return }
             do {
@@ -1424,7 +1407,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                     episodeStartedAt: startedAt
                 )
                 guard rawCaptureExpected, recordingOngoing, captureEpisodeId == exerciseId else { return }
-                startStreamTasks(ecgSetting: ecgSetting, accSetting: accSetting, captureId: captureId)
+                startStreamTasks(accSetting: accSetting, captureId: captureId)
             }
             await refreshRawCaptureSize()
         } catch {
@@ -1488,25 +1471,21 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         }
     }
 
-    private func startStreamTasks(ecgSetting: PolarSensorSetting?, accSetting: PolarSensorSetting?, captureId: UUID) {
+    private func startStreamTasks(accSetting: PolarSensorSetting?, captureId: UUID) {
         let streamSegmentId = UUID()
         streamWatchdogTask?.cancel()
-        ecgStreamTask?.cancel()
         accStreamTask?.cancel()
         hrStreamTask?.cancel()
 
-        ecgStreamRunning = false
         accStreamRunning = false
         hrStreamRunning = false
         rawStreamActive = false
         streamAttemptActive = true
         expectedPMDChannels = []
-        if ecgSetting != nil { expectedPMDChannels.insert("ecg") }
         if accSetting != nil { expectedPMDChannels.insert("acc") }
         if phoneMode { expectedPMDChannels.insert("rr") }
         streamAttemptStartedAt = Date()
         lastPacketAt = [:]
-        lastECGAnchorAt = nil
         lastACCAnchorAt = nil
         let attemptStartedAt = streamAttemptStartedAt ?? Date()
         let channelsForEvent = expectedPMDChannels
@@ -1515,48 +1494,6 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                 kind: "stream_start_attempt",
                 detail: "Starting \(channelsForEvent.sorted().joined(separator: "+")) PMD stream(s)."
             )
-        }
-
-        if let ecgSetting {
-            ecgStreamRunning = true
-            ecgStreamTask = Task { [weak self] in
-                guard let self else { return }
-                do {
-                    for try await batch in self.api.startEcgStreaming(self.deviceId, settings: ecgSetting) {
-                        if Task.isCancelled { break }
-                        let receivedAt = Date()
-                        let receivedUptime = ProcessInfo.processInfo.systemUptime
-                        let samples = batch.map {
-                            ResearchECGSample(deviceTimestampNs: $0.timeStamp, voltageMicrovolts: $0.voltage)
-                        }
-                        try await self.researchStore.appendECG(samples, captureId: captureId)
-                        self.notePacket(channel: "ecg", receivedAt: receivedAt)
-                        if let first = samples.first, let last = samples.last {
-                            try await self.researchStore.appendTimeAnchor(
-                                channel: "ecg",
-                                deviceTimestampNs: last.deviceTimestampNs,
-                                hostReceivedAt: receivedAt,
-                                captureId: captureId,
-                                firstDeviceTimestampNs: first.deviceTimestampNs,
-                                hostUptimeSeconds: receivedUptime,
-                                streamSegmentId: streamSegmentId,
-                                packetSampleCount: samples.count
-                            )
-                            self.lastECGAnchorAt = receivedAt
-                        }
-                        await self.refreshRawCaptureSize()
-                    }
-                    if StreamHealthPolicy.shouldRecoverAfterTermination(
-                        captureExpected: self.rawCaptureExpected,
-                        recordingOngoing: self.recordingOngoing,
-                        taskCancelled: Task.isCancelled
-                    ) {
-                        await self.streamEnded(channel: "ECG", error: nil)
-                    }
-                } catch {
-                    await self.streamEnded(channel: "ECG", error: error)
-                }
-            }
         }
 
         if let accSetting {
@@ -1647,7 +1584,6 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         }
 
         let channels = [
-            ecgStreamRunning ? "ECG" : nil,
             accStreamRunning ? "ACC" : nil,
             hrStreamRunning ? "HR" : nil
         ].compactMap { $0 }
@@ -1674,14 +1610,14 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         if wasStarting {
             if phoneMode {
                 clearError()
-                statusText = "Live RR + ECG + movement confirmed; saving on iPhone."
+                statusText = "Live RR + movement confirmed; saving on iPhone."
             }
             Task { [researchStore] in
                 try? await researchStore.appendEvent(
                     kind: "stream_healthy",
                     detail: "Fresh packets received from every expected PMD channel."
                 )
-                try? await researchStore.appendEvent(kind: "gap_ended", detail: "Fresh RR/ECG/movement packets confirmed.")
+                try? await researchStore.appendEvent(kind: "gap_ended", detail: "Fresh RR/movement packets confirmed.")
             }
         }
     }
@@ -1719,20 +1655,19 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         if phoneMode, let error {
             fail("Live \(channel) capture interrupted: \(error.localizedDescription). Durable received chunks are retained.")
         }
-        // HR is an opportunistic QA channel. It must never tear down healthy
-        // ECG/ACC streams if the standard Heart Rate Service ends by itself.
+        // HR is an opportunistic QA channel. It must never tear down a healthy
+        // ACC stream if the standard Heart Rate Service ends by itself.
         if channel == "HR" && !phoneMode {
             hrStreamRunning = false
             hrStreamTask = nil
-            rawStreamActive = ecgStreamRunning || accStreamRunning
-            rawStreamStatus = rawStreamActive ? "ECG + ACC · HR unavailable" : "RR only · HR unavailable"
+            rawStreamActive = accStreamRunning
+            rawStreamStatus = rawStreamActive ? "ACC · HR unavailable" : "RR only · HR unavailable"
             try? await researchStore.appendEvent(
                 kind: "optional_hr_stream_ended",
                 detail: error?.localizedDescription ?? "The SDK stream completed without an error."
             )
             return
         }
-        if channel == "ECG" { ecgStreamRunning = false }
         if channel == "accelerometer" { accStreamRunning = false }
         streamAttemptActive = false
         rawStreamActive = false
@@ -1751,20 +1686,16 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         streamWatchdogTask?.cancel()
         streamWatchdogTask = nil
 
-        ecgStreamTask?.cancel()
         accStreamTask?.cancel()
         hrStreamTask?.cancel()
-        ecgStreamTask = nil
         accStreamTask = nil
         hrStreamTask = nil
 
         if connectionState == .connected {
-            if ecgStreamRunning { try? await api.stopStreaming(deviceId, type: .ecg) }
             if accStreamRunning { try? await api.stopStreaming(deviceId, type: .acc) }
             if hrStreamRunning { try? await api.stopHrStreaming(deviceId) }
         }
 
-        ecgStreamRunning = false
         accStreamRunning = false
         hrStreamRunning = false
         streamAttemptActive = false
@@ -1790,25 +1721,21 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         if researchReconnectTask != nil { return }
         streamWatchdogTask?.cancel()
         streamWatchdogTask = nil
-        ecgStreamTask?.cancel()
         accStreamTask?.cancel()
         hrStreamTask?.cancel()
-        ecgStreamTask = nil
         accStreamTask = nil
         hrStreamTask = nil
-        ecgStreamRunning = false
         accStreamRunning = false
         hrStreamRunning = false
         streamAttemptActive = false
         rawStreamActive = false
-        rawStreamStatus = phoneMode ? "Recording gap · reconnecting RR/ECG/movement" : "RR safe · reconnecting high-resolution stream"
-        // Install the recovery task before the first await so simultaneous ECG
-        // and ACC failures cannot create two competing reconnect loops.
+        rawStreamStatus = phoneMode ? "Recording gap · reconnecting RR/movement" : "RR safe · reconnecting high-resolution stream"
+        // Install the recovery task before the first await so simultaneous stream
+        // failures cannot create competing reconnect loops.
         scheduleResearchReconnect()
         try? await researchStore.appendEvent(kind: "gap_started", detail: detail)
 
         if connectionState == .connected {
-            try? await api.stopStreaming(deviceId, type: .ecg)
             try? await api.stopStreaming(deviceId, type: .acc)
             try? await api.stopHrStreaming(deviceId)
         }
@@ -1852,18 +1779,15 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                         self.consecutivePMDRestartFailures += 1
                         try? await self.researchStore.appendEvent(
                             kind: "stream_restart_unconfirmed",
-                            detail: "Restart attempt \(attempt + 1) produced no complete ECG/ACC packet confirmation."
+                            detail: "Restart attempt \(attempt + 1) produced no complete RR/ACC packet confirmation."
                         )
                         self.streamWatchdogTask?.cancel()
-                        self.ecgStreamTask?.cancel()
                         self.accStreamTask?.cancel()
                         self.hrStreamTask?.cancel()
-                        self.ecgStreamRunning = false
                         self.accStreamRunning = false
                         self.hrStreamRunning = false
                         self.streamAttemptActive = false
                         self.rawStreamActive = false
-                        try? await self.api.stopStreaming(self.deviceId, type: .ecg)
                         try? await self.api.stopStreaming(self.deviceId, type: .acc)
                         try? await self.api.stopHrStreaming(self.deviceId)
 

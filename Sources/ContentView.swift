@@ -52,7 +52,7 @@ struct ContentView: View {
         if recorder.fetchInProgress { return "Keep your H10 nearby while the raw recording is saved to your phone." }
         if uploader.busy { return uploader.statusText }
         if sensorBusy { return recorder.statusText }
-        if recorder.phoneNightPending { return recorder.phoneNightEndedAt != nil ? "Tap End night to retry local saving. Received data is retained." : "RR, ECG and movement save continuously on this iPhone. Keep Bluetooth on and your phone nearby. Do not force-close Recorder." }
+        if recorder.phoneNightPending { return recorder.phoneNightEndedAt != nil ? "Tap End night to retry local saving. Received data is retained." : "RR and movement save continuously on this iPhone. Keep Bluetooth on and your phone nearby. Do not force-close Recorder." }
         if recorder.lastSavedFile != nil { return uploaded ? "AthleteOS has verified the raw recording." : "Your raw file is safe on this phone and will archive when AthleteOS is connected." }
         if recorder.connectionState == .connected && !ready { return recorder.preparationMessage }
         if uploader.lastUploadedRecordingId != nil && savedFiles.isEmpty { return uploader.statusText }
@@ -312,7 +312,7 @@ struct ContentView: View {
                 await notifications.event(key: "action-\(night)", title: "Recorder needs your attention", body: error)
             } else if recorder.recordingOngoing && recorder.rawStreamActive {
                 await notifications.event(key: "started-\(night)", title: "Night recording confirmed",
-                    body: "Live RR, ECG and movement confirmed. Keep Bluetooth on and the phone nearby; do not force-close Recorder.")
+                    body: "Live RR and movement confirmed. Keep Bluetooth on and the phone nearby; do not force-close Recorder.")
             }
             await processPendingUploads()
             if let file = recorder.lastSavedFile, !uploader.isConnected {
@@ -336,7 +336,7 @@ struct ContentView: View {
             recorder.markArchiveConfirmedAndLocalDeleted(for: file, identity: identity)
             syncReminders()
             await notifications.event(key: "archived-\(receipt.recordingID)", title: "Night safely archived",
-                body: "AthleteOS verified your raw RR recording. The iPhone RR export has been removed; ECG/movement archives retry independently.")
+                body: "AthleteOS verified your raw RR recording. The iPhone RR export has been removed; movement archives retry independently.")
             await recorder.cleanupQueuedSensorCopies()
             await refreshSavedFiles()
         } catch {
