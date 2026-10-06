@@ -82,7 +82,7 @@ Bluetooth connection in the extension. The foreground app owns Bluetooth and raw
 storage. Keep the extension when SideStore signs the eventual approved release.
 
 Enable local notifications in Recorder Settings. Defaults are 21:00 evening and
-07:00 morning, editable in local time. Evening prompts pause while a night awaits
+09:00 morning, editable in local time. Evening prompts pause while a night awaits
 collection; the one-off morning prompt is cancelled after a durable save. An old
 pending night is not moved forward into another morning on every app launch.
 Verified start/archive and attention alerts are deduplicated across app restarts.
