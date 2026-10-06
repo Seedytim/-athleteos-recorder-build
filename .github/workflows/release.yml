@@ -71,15 +71,22 @@ jobs:
           test "$WIDGET_VERSION" = "$VERSION"
           test "$WIDGET_BUILD" = "$BUILD"
 
-          # The generated AppIcon asset catalog must be compiled into the device app.
+          # Verify the actual built app, not just source assets. iOS app icons may
+          # be emitted as PNGs beside Assets.car rather than listed by assetutil.
           test -s "$APP/Assets.car"
-          /usr/bin/assetutil --info "$APP/Assets.car" > /tmp/assets.json
-          grep -q 'AppIcon' /tmp/assets.json || {
-            echo "Compiled AppIcon was not found in Assets.car"
-            cat /tmp/assets.json
+          plutil -p "$APP/Info.plist" > /tmp/app-info.txt
+          grep -q 'AppIcon' /tmp/app-info.txt || {
+            echo "Built app is missing AppIcon metadata."
+            cat /tmp/app-info.txt
             exit 1
           }
-          echo "Compiled Home Screen AppIcon verified in Assets.car"
+          ICON_COUNT=$(find "$APP" -maxdepth 1 -type f -name '*AppIcon*.png' | wc -l | tr -d ' ')
+          if [ "$ICON_COUNT" -lt 1 ]; then
+            echo "Built app contains no compiled AppIcon PNG."
+            find "$APP" -maxdepth 1 -type f -print
+            exit 1
+          fi
+          echo "Compiled Home Screen AppIcon verified ($ICON_COUNT PNG file(s))."
 
           # Background BLE is required for locked-phone streaming.
           BG=$(/usr/libexec/PlistBuddy -c "Print :UIBackgroundModes:0" "$APP/Info.plist")
