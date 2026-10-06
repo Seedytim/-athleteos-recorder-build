@@ -1336,7 +1336,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         }
 
         guard onlineStreamingFeatureReady else {
-            rawStreamStatus = "RR only · PMD streaming service not ready"
+            rawStreamStatus = phoneMode ? "Live services not ready · no new samples" : "RR only · PMD streaming service not ready"
             rawStreamActive = false
             return
         }
@@ -1664,6 +1664,10 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         let channels = expectedPMDChannels.sorted().map { $0.uppercased() }.joined(separator: " + ")
         rawStreamStatus = channels.isEmpty ? "RR only" : channels + " live"
         if wasStarting {
+            if phoneMode {
+                clearError()
+                statusText = "Live RR + ECG + movement confirmed; saving on iPhone."
+            }
             Task { [researchStore] in
                 try? await researchStore.appendEvent(
                     kind: "stream_healthy",

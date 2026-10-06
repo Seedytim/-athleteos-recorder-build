@@ -252,7 +252,7 @@ actor ResearchCaptureStore {
             options: [.skipsHiddenFiles]
         ) {
             // Repeated foreground recovery must never finalize a live writer.
-            if active?.directory == captureDir { continue }
+            if active?.directory.resolvingSymlinksInPath().standardizedFileURL == captureDir.resolvingSymlinksInPath().standardizedFileURL { continue }
             let values = try captureDir.resourceValues(forKeys: [.isDirectoryKey])
             guard values.isDirectory == true else { continue }
             let manifestURL = captureDir.appendingPathComponent("manifest.json")
