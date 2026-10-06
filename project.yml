@@ -36,7 +36,7 @@ targets:
         CFBundleDisplayName: AthleteOS Recorder
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
-        NSBluetoothAlwaysUsageDescription: AthleteOS Recorder connects to your Polar H10 to preserve raw overnight RR, ECG, heart-rate and accelerometer data.
+        NSBluetoothAlwaysUsageDescription: AthleteOS Recorder connects to your Polar H10 to preserve raw overnight RR, heart-rate and accelerometer data.
         CFBundleURLTypes:
           - CFBundleURLName: nz.co.athleteos.recorder
             CFBundleURLSchemes:
