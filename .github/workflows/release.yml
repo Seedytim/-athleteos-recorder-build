@@ -156,7 +156,7 @@ jobs:
                       "version": version,
                       "buildVersion": build,
                       "date": date,
-                      "localizedDescription": "Same one-button Recorder with richer raw H10 capture underneath: safety RR plus ECG, accelerometer and HR.",
+                      "localizedDescription": "One-button Recorder with richer raw H10 capture underneath: safety RR plus ECG, accelerometer and HR.",
                       "downloadURL": download,
                       "size": int(size),
                       "minOSVersion": "16.0",
