@@ -60,12 +60,16 @@ jobs:
           test "$VERSION" = "2.1.0"
           test "$BUILD" = "15"
 
-          # WidgetKit was explicitly removed. No app extension may ship in the Recorder IPA.
-          if find "$APP" -type d -name '*.appex' -print -quit | grep -q .; then
-            echo "Unexpected app extension found in Recorder bundle."
-            find "$APP" -type d -name '*.appex' -print
-            exit 1
-          fi
+          # Preserve the existing Home Screen night recorder widget.
+          WIDGET="$APP/PlugIns/RecorderWidget.appex"
+          test -d "$WIDGET"
+          WIDGET_BUNDLE=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$WIDGET/Info.plist")
+          WIDGET_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$WIDGET/Info.plist")
+          WIDGET_BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$WIDGET/Info.plist")
+          echo "Widget bundle=$WIDGET_BUNDLE version=$WIDGET_VERSION build=$WIDGET_BUILD"
+          test "$WIDGET_BUNDLE" = "nz.co.athleteos.recorder.widget"
+          test "$WIDGET_VERSION" = "$VERSION"
+          test "$WIDGET_BUILD" = "$BUILD"
 
           # Validate the icon the way iOS consumes it: Info.plist must reference a
           # compiled primary icon and the build must contain the generated icon PNGs.
