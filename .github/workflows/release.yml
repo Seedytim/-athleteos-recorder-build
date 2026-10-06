@@ -217,7 +217,7 @@ jobs:
           # this Recorder-owned feed. Refuse success until the live source resolves
           # to the exact immutable artifact that was just validated.
           for attempt in 1 2 3 4 5; do
-            if curl -fL --no-cache "$SIDE_SOURCE_URL" -o /tmp/live-source.json; then
+            if curl -fL -H "Cache-Control: no-cache" "${SIDE_SOURCE_URL}?v=${ARTIFACT_COMMIT}" -o /tmp/live-source.json; then
               if python3 - "$VERSION" "$BUILD" "$SIZE" "$DOWNLOAD_URL" <<'PY'
           import json, sys
           version, build, size, download = sys.argv[1:]
