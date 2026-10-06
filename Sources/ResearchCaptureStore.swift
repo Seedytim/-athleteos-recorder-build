@@ -169,7 +169,7 @@ actor ResearchCaptureStore {
 
         let manifestURL = directory.appendingPathComponent("manifest.json")
         let eventsURL = directory.appendingPathComponent("events.ndjson")
-        FileManager.default.createFile(atPath: eventsURL.path, contents: nil)
+        createProtectedFile(at: eventsURL)
 
         let manifest = ResearchCaptureManifest(
             schemaVersion: 1,
@@ -415,7 +415,7 @@ actor ResearchCaptureStore {
         let name = String(format: "%@-%04d.bin", channel, chunkIndex)
         let url = capture.directory.appendingPathComponent(name)
         if !FileManager.default.fileExists(atPath: url.path) {
-            FileManager.default.createFile(atPath: url.path, contents: nil)
+            createProtectedFile(at: url)
         }
         let handle = try FileHandle(forWritingTo: url)
         try handle.seekToEnd()
@@ -455,7 +455,7 @@ actor ResearchCaptureStore {
         guard var capture = active else { throw StoreError.noActiveCapture }
         let url = capture.directory.appendingPathComponent(fileName)
         if !FileManager.default.fileExists(atPath: url.path) {
-            FileManager.default.createFile(atPath: url.path, contents: nil)
+            createProtectedFile(at: url)
             capture.manifest.files.append(
                 ResearchCaptureFile(channel: channel, fileName: fileName, recordEncoding: recordEncoding, byteCount: 0, recordCount: 0)
             )
@@ -474,7 +474,7 @@ actor ResearchCaptureStore {
 
     private func appendLine(_ data: Data, to url: URL, alreadyTerminated: Bool = false) throws {
         if !FileManager.default.fileExists(atPath: url.path) {
-            FileManager.default.createFile(atPath: url.path, contents: nil)
+            createProtectedFile(at: url)
         }
         let handle = try FileHandle(forWritingTo: url)
         defer { try? handle.close() }
@@ -495,10 +495,32 @@ actor ResearchCaptureStore {
     }
 
     private func durableWrite(_ data: Data, to url: URL) throws {
-        try data.write(to: url, options: [.atomic, .completeFileProtection])
+        #if os(iOS)
+        // Overnight capture must remain writable while the phone is locked.
+        // "Complete" protection would make the file unavailable at lock time.
+        try data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        try? FileManager.default.setAttributes(
+            [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+            ofItemAtPath: url.path
+        )
+        #else
+        try data.write(to: url, options: [.atomic])
+        #endif
         let handle = try FileHandle(forWritingTo: url)
         defer { try? handle.close() }
         try handle.synchronize()
+    }
+
+    private func createProtectedFile(at url: URL) {
+        #if os(iOS)
+        FileManager.default.createFile(
+            atPath: url.path,
+            contents: nil,
+            attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication]
+        )
+        #else
+        FileManager.default.createFile(atPath: url.path, contents: nil)
+        #endif
     }
 
     private func fixedRecordSize(for recordEncoding: String) -> Int? {
