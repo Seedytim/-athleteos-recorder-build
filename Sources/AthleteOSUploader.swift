@@ -247,8 +247,8 @@ final class AthleteOSUploader: ObservableObject {
                 "files": prepared.map {
                     [
                         "file_name": $0.file.fileName,
-                        "channel": $0.file.channel as Any,
-                        "record_encoding": $0.file.recordEncoding as Any,
+                        "channel": $0.file.channel ?? NSNull(),
+                        "record_encoding": $0.file.recordEncoding ?? NSNull(),
                         "byte_count": NSNumber(value: $0.byteCount),
                         "sha256": $0.sha256,
                     ] as [String: Any]
