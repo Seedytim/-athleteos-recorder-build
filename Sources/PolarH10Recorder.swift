@@ -1101,7 +1101,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                     for try await batch in self.api.startEcgStreaming(self.deviceId, settings: ecgSetting) {
                         if Task.isCancelled { break }
                         let receivedAt = Date()
-                        let samples = batch.samples.map {
+                        let samples = batch.map {
                             ResearchECGSample(deviceTimestampNs: $0.timeStamp, voltageMicrovolts: $0.voltage)
                         }
                         try await self.researchStore.appendECG(samples)
@@ -1200,7 +1200,8 @@ final class PolarH10Recorder: NSObject, ObservableObject {
     }
 
     private func stopResearchCapture(reason: String) async {
-        let hadCapture = rawCaptureExpected || rawStreamActive || await researchStore.activeCaptureId() != nil
+        let storedCaptureId = await researchStore.activeCaptureId()
+        let hadCapture = rawCaptureExpected || rawStreamActive || storedCaptureId != nil
         rawCaptureExpected = false
         UserDefaults.standard.set(false, forKey: Keys.rawCaptureExpected)
         researchReconnectTask?.cancel()
@@ -1303,10 +1304,12 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         let supportedMap = Dictionary(uniqueKeysWithValues: supported.settings.map {
             (settingName($0.key), Array($0.value).sorted())
         })
-        let selectedMap = Dictionary(uniqueKeysWithValues: selected.settings.compactMap {
-            guard let value = $0.value.first else { return nil }
-            return (settingName($0.key), value)
-        })
+        var selectedMap: [String: UInt32] = [:]
+        for (type, values) in selected.settings {
+            if let value = values.first {
+                selectedMap[settingName(type)] = value
+            }
+        }
         return ResearchChannelDescriptor(
             channel: channel,
             source: source,
