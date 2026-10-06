@@ -31,9 +31,6 @@ jobs:
       - name: Generate app icon assets
         run: python3 Scripts/generate_app_icons.py
 
-      - name: Generate app icon assets
-        run: python3 Scripts/generate_app_icons.py
-
       - name: Generate Xcode project
         run: xcodegen generate
 
