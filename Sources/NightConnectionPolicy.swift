@@ -17,6 +17,17 @@ enum NightConnectionPolicy {
 }
 
 
+/// Stored-file reads need PS-FTP, but they do not need the H10 exercise-recording
+/// service to advertise readiness again after the recording has already stopped.
+/// Keeping this separate prevents a healthy file-transfer session being rejected
+/// just because the recording-service callback is late or absent.
+enum StoredFetchConnectionPolicy {
+    static func ready(connected: Bool, transferReady: Bool) -> Bool {
+        connected && transferReady
+    }
+}
+
+
 enum NightOperation: Equatable { case start, end, archiveSaved }
 
 enum NightActionPolicy {
