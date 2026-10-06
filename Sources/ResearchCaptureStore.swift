@@ -74,6 +74,12 @@ struct ResearchCaptureEvent: Codable, Sendable, Equatable {
     let detail: String
 }
 
+struct ResearchTimeAnchor: Codable, Sendable, Equatable {
+    let channel: String
+    let deviceTimestampNs: UInt64
+    let hostReceivedAt: Date
+}
+
 struct ResearchCaptureSummary: Sendable, Equatable {
     let captureId: UUID
     let directory: URL
@@ -215,12 +221,40 @@ actor ResearchCaptureStore {
             var manifest = try decoder.decode(ResearchCaptureManifest.self, from: Data(contentsOf: manifestURL))
             guard manifest.state == "recording" else { continue }
 
+            var repairDetails: [String] = []
+            for index in manifest.files.indices {
+                let file = manifest.files[index]
+                let rawURL = captureDir.appendingPathComponent(file.fileName)
+                guard FileManager.default.fileExists(atPath: rawURL.path),
+                      let recordSize = fixedRecordSize(for: file.recordEncoding) else { continue }
+
+                let actualSize = UInt64((try? rawURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+                let validSize = actualSize - (actualSize % UInt64(recordSize))
+                if validSize != actualSize {
+                    let handle = try FileHandle(forWritingTo: rawURL)
+                    try handle.truncate(atOffset: validSize)
+                    try handle.synchronize()
+                    try handle.close()
+                    repairDetails.append("\(file.fileName): trimmed \(actualSize - validSize) incomplete byte(s)")
+                }
+                manifest.files[index].byteCount = validSize
+                manifest.files[index].recordCount = validSize / UInt64(recordSize)
+            }
+
             let event = ResearchCaptureEvent(
                 at: now,
                 kind: "recovered_after_interruption",
                 detail: "Recorder relaunched while this capture was still marked recording. Existing raw chunks were retained; no inferred samples were inserted."
             )
             try appendLine(try lineEncoder.encode(event), to: captureDir.appendingPathComponent("events.ndjson"))
+            if !repairDetails.isEmpty {
+                let repair = ResearchCaptureEvent(
+                    at: now,
+                    kind: "partial_chunk_repaired",
+                    detail: repairDetails.joined(separator: "; ")
+                )
+                try appendLine(try lineEncoder.encode(repair), to: captureDir.appendingPathComponent("events.ndjson"))
+            }
             manifest.state = FinalState.interrupted.rawValue
             manifest.endedAt = now
             try writeManifest(manifest, to: manifestURL)
@@ -262,6 +296,20 @@ actor ResearchCaptureStore {
         guard let active else { throw StoreError.noActiveCapture }
         let event = ResearchCaptureEvent(at: at, kind: kind, detail: detail)
         try appendLine(try lineEncoder.encode(event), to: active.eventsURL)
+    }
+
+    func appendTimeAnchor(channel: String, deviceTimestampNs: UInt64, hostReceivedAt: Date = Date()) throws {
+        let anchor = ResearchTimeAnchor(
+            channel: channel,
+            deviceTimestampNs: deviceTimestampNs,
+            hostReceivedAt: hostReceivedAt
+        )
+        try appendLine(
+            try lineEncoder.encode(anchor),
+            toActiveNamedFile: "time-anchors.ndjson",
+            channel: "timebase",
+            recordEncoding: "ndjson:ResearchTimeAnchor"
+        )
     }
 
     func finish(
@@ -451,6 +499,12 @@ actor ResearchCaptureStore {
         let handle = try FileHandle(forWritingTo: url)
         defer { try? handle.close() }
         try handle.synchronize()
+    }
+
+    private func fixedRecordSize(for recordEncoding: String) -> Int? {
+        if recordEncoding == "little_endian:uint64_timestamp_ns,int32_microvolts" { return 12 }
+        if recordEncoding == "little_endian:uint64_timestamp_ns,int32_x_mg,int32_y_mg,int32_z_mg" { return 20 }
+        return nil
     }
 
     private func appendLittleEndian<T: FixedWidthInteger>(_ value: T, to data: inout Data) {
