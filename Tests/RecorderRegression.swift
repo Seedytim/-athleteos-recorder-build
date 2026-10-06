@@ -184,6 +184,19 @@ struct RecorderRegression {
                      "Direct H10 RR read must not regress to a multi-minute per-attempt timeout")
         precondition(fetchBody.contains("try await resetConnectionForStoredFetch()"),
                      "Reconnect must remain available as recovery after an actual read failure")
+        precondition(fetchBody.contains("isPolarSessionUnavailable(error)"),
+                     "Polar SDK session-loss errors must trigger explicit session recovery")
+        precondition(fetchBody.contains("recoverMissingSdkSessionForStoredFetch()"),
+                     "Stored RR fetch must recover a missing Polar SDK session instead of repeating the same failing call")
+
+        precondition(source.contains("sdkSessionIdentifier = identifier.address.uuidString"),
+                     "Connected peripheral UUID must be captured for stable SDK session lookup")
+        precondition(source.contains("let sensorId = preferredSdkIdentifier"),
+                     "Stored-file operations must prefer the CoreBluetooth peripheral UUID")
+        precondition(source.contains("case .deviceNotConnected, .deviceNotFound:"),
+                     "Polar error 2/3 must be classified as session loss")
+        precondition(source.contains("try await Task.sleep(for: .seconds(2))"),
+                     "Recovered file-transfer sessions need a post-ready settle period")
 
         guard let resetStart = source.range(of: "private func resetConnectionForStoredFetch() async throws {"),
               let fetchRange = source.range(of: "private func fetchAndSaveStoredRecording", range: resetStart.upperBound..<source.endIndex) else {
@@ -195,7 +208,7 @@ struct RecorderRegression {
         precondition(!resetBody.contains("connectionState == .connected && h10RecordingFeatureReady && fileTransferFeatureReady"),
                      "Stopped-file recovery must not require the exercise-recording service callback")
 
-        print("PASS: morning save is direct-first, reconnect is recovery-only, PS-FTP-only readiness, bounded read time")
+        print("PASS: morning save direct-first + UUID session lookup + Polar error 2/3 recovery + bounded PS-FTP retry")
     }
 
     static func testCleanupJournal(raw: RawH10RRRecording, sha: String, id: String) async throws {
