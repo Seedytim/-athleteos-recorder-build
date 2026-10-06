@@ -9,30 +9,60 @@ permissions:
 jobs:
   release:
     runs-on: macos-15
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Refuse stale or non-main release
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          SOURCE=$(git rev-parse HEAD)
+          MAIN=$(git rev-parse origin/main)
+          test "$SOURCE" = "$MAIN" || {
+            echo "Release must run from the current main commit."
+            echo "source=$SOURCE main=$MAIN"
+            exit 1
+          }
+
       - name: Regression tests
         run: |
           swiftc Sources/NightConnectionPolicy.swift Sources/RecordingModels.swift Sources/RecordingStore.swift Sources/ResearchCaptureStore.swift Sources/UploadReceipt.swift Sources/AthleteOSUploader.swift Tests/RecorderRegression.swift -o /tmp/recorder-regression
           /tmp/recorder-regression
+
+      - name: Verify removed product surface stays removed
+        run: |
+          set -euo pipefail
+          test ! -d Widget
+          ! grep -R -n -E 'WidgetKit|RecorderWidget|RecorderNotifications|Home Screen widget' Sources project.yml || {
+            echo "Removed widget/notification surface reappeared."
+            exit 1
+          }
+
       - name: Install XcodeGen
         run: brew install xcodegen
+
       - name: Generate Xcode project
         run: xcodegen generate
+
       - name: Cache pinned Polar dependencies
         uses: actions/cache@v4
         with:
           path: .swift-packages
           key: polar-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('project.yml') }}
+
       - name: Resolve Polar BLE SDK
         run: xcodebuild -resolvePackageDependencies -clonedSourcePackagesDirPath .swift-packages -project AthleteOSRecorder.xcodeproj -scheme AthleteOSRecorder
+
       - name: Compile iPhone simulator
         run: xcodebuild -clonedSourcePackagesDirPath .swift-packages -project AthleteOSRecorder.xcodeproj -scheme AthleteOSRecorder -configuration Debug -sdk iphonesimulator -derivedDataPath build-simulator -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build
+
       - name: Build unsigned device app
         run: xcodebuild -clonedSourcePackagesDirPath .swift-packages -project AthleteOSRecorder.xcodeproj -scheme AthleteOSRecorder -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build-device CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
+
       - name: Package unsigned IPA
         run: |
           set -euo pipefail
@@ -41,32 +71,202 @@ jobs:
           cp -R build-device/Build/Products/Release-iphoneos/AthleteOSRecorder.app Payload/
           zip -qry AthleteOSRecorder.ipa Payload
           test -s AthleteOSRecorder.ipa
-      - name: Publish stable build artifact
+
+      - name: Validate built app and IPA
         run: |
           set -euo pipefail
           APP="build-device/Build/Products/Release-iphoneos/AthleteOSRecorder.app"
           VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Info.plist")
           BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP/Info.plist")
-          SIZE=$(stat -f%z AthleteOSRecorder.ipa)
-          SHA256=$(shasum -a 256 AthleteOSRecorder.ipa | awk '{print $1}')
+          test "$VERSION" = "2.1.0"
+          test "$BUILD" = "15"
+
+          test -s "$APP/Assets.car"
+          ICON_COUNT=$(find "$APP" -maxdepth 1 -type f -name 'AppIcon*.png' | wc -l | tr -d ' ')
+          test "$ICON_COUNT" -gt 0 || {
+            echo "No compiled AppIcon PNG found in app bundle."
+            exit 1
+          }
+
+          if find "$APP" -type d -path '*/PlugIns/*.appex' -print -quit | grep -q .; then
+            echo "Unexpected app extension bundled:"
+            find "$APP" -type d -path '*/PlugIns/*.appex'
+            exit 1
+          fi
+
+          rm -rf /tmp/ipa-check
+          mkdir /tmp/ipa-check
+          unzip -q AthleteOSRecorder.ipa -d /tmp/ipa-check
+          IPA_APP="/tmp/ipa-check/Payload/AthleteOSRecorder.app"
+          test -f "$IPA_APP/Info.plist"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$IPA_APP/Info.plist")" = "$VERSION"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$IPA_APP/Info.plist")" = "$BUILD"
+          test -s "$IPA_APP/Assets.car"
+          test "$(find "$IPA_APP" -maxdepth 1 -type f -name 'AppIcon*.png' | wc -l | tr -d ' ')" -gt 0
+          if find "$IPA_APP" -type d -path '*/PlugIns/*.appex' -print -quit | grep -q .; then
+            echo "IPA contains an unwanted app extension."
+            exit 1
+          fi
+
+      - name: Publish immutable release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          APP="build-device/Build/Products/Release-iphoneos/AthleteOSRecorder.app"
+          VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Info.plist")
+          BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP/Info.plist")
+          TAG="recorder-v${VERSION}-b${BUILD}"
+          SOURCE=$(git rev-parse HEAD)
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release tag $TAG already exists. Refusing to replace an immutable SideStore artifact."
+            exit 1
+          fi
+
+          gh release create "$TAG" AthleteOSRecorder.ipa             --target "$SOURCE"             --title "AthleteOS Recorder ${VERSION} (${BUILD})"             --notes "Raw-only Recorder: H10 internal RR safety record plus diagnostic ECG, accelerometer and HR capture."
+
+          echo "RECORDER_TAG=$TAG" >> "$GITHUB_ENV"
+          echo "RECORDER_SOURCE=$SOURCE" >> "$GITHUB_ENV"
+          echo "RECORDER_VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "RECORDER_BUILD=$BUILD" >> "$GITHUB_ENV"
+
+      - name: Verify immutable download artifact
+        run: |
+          set -euo pipefail
+          URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RECORDER_TAG}/AthleteOSRecorder.ipa"
+          LOCAL_SIZE=$(stat -f%z AthleteOSRecorder.ipa)
+          LOCAL_SHA=$(shasum -a 256 AthleteOSRecorder.ipa | awk '{print $1}')
+
+          rm -f /tmp/remote-recorder.ipa
+          for attempt in 1 2 3 4 5 6; do
+            if curl -fL --retry 2 --retry-delay 2 "$URL" -o /tmp/remote-recorder.ipa; then break; fi
+            sleep $((attempt * 2))
+          done
+          test -s /tmp/remote-recorder.ipa
+          REMOTE_SIZE=$(stat -f%z /tmp/remote-recorder.ipa)
+          REMOTE_SHA=$(shasum -a 256 /tmp/remote-recorder.ipa | awk '{print $1}')
+          test "$REMOTE_SIZE" = "$LOCAL_SIZE"
+          test "$REMOTE_SHA" = "$LOCAL_SHA"
+
+          rm -rf /tmp/remote-check
+          mkdir /tmp/remote-check
+          unzip -q /tmp/remote-recorder.ipa -d /tmp/remote-check
+          REMOTE_APP="/tmp/remote-check/Payload/AthleteOSRecorder.app"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$REMOTE_APP/Info.plist")" = "$RECORDER_VERSION"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$REMOTE_APP/Info.plist")" = "$RECORDER_BUILD"
+          test -s "$REMOTE_APP/Assets.car"
+          test "$(find "$REMOTE_APP" -maxdepth 1 -type f -name 'AppIcon*.png' | wc -l | tr -d ' ')" -gt 0
+          if find "$REMOTE_APP" -type d -path '*/PlugIns/*.appex' -print -quit | grep -q .; then
+            echo "Remote release IPA unexpectedly contains an app extension."
+            exit 1
+          fi
+
+          echo "RECORDER_SIZE=$LOCAL_SIZE" >> "$GITHUB_ENV"
+          echo "RECORDER_SHA=$LOCAL_SHA" >> "$GITHUB_ENV"
+          echo "RECORDER_URL=$URL" >> "$GITHUB_ENV"
+
+      - name: Build and validate SideStore feed
+        run: |
+          set -euo pipefail
           mkdir -p dist
           cp AthleteOSRecorder.ipa dist/AthleteOSRecorder.ipa
-          SOURCE=$(git rev-parse HEAD)
-          python3 - "$VERSION" "$BUILD" "$SIZE" "$SHA256" "$SOURCE" <<'PY'
+          DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          python3 - "$RECORDER_VERSION" "$RECORDER_BUILD" "$RECORDER_SIZE" "$RECORDER_SHA" "$RECORDER_SOURCE" "$RECORDER_TAG" "$RECORDER_URL" "$DATE" <<'PY'
           import json, sys
-          version, build, size, sha256, source = sys.argv[1:]
-          with open("dist/build.json","w") as f:
-              json.dump({"version":version,"build":build,"size":int(size),"sha256":sha256,"source_commit":source},f,indent=2)
+          version, build, size, sha256, source, tag, url, date = sys.argv[1:]
+          size = int(size)
+
+          build_meta = {
+              "version": version,
+              "build": build,
+              "size": size,
+              "sha256": sha256,
+              "source_commit": source,
+              "release_tag": tag,
+              "download_url": url,
+          }
+          feed = {
+              "name": "AthleteOS Recorder",
+              "identifier": "nz.co.athleteos.recorder.source",
+              "sourceURL": "https://athleteos-pink-sigma.vercel.app/recorder/source.json",
+              "apps": [{
+                  "name": "AthleteOS Recorder",
+                  "bundleIdentifier": "nz.co.athleteos.recorder",
+                  "developerName": "AthleteOS",
+                  "localizedDescription": "Raw Polar H10 overnight recorder for AthleteOS.",
+                  "iconURL": "https://athleteos-pink-sigma.vercel.app/recorder/icon.png",
+                  "versions": [{
+                      "version": version,
+                      "buildVersion": build,
+                      "date": date,
+                      "localizedDescription": "Raw-only recorder with H10 internal RR safety recording and diagnostic ECG/accelerometer/HR capture.",
+                      "downloadURL": url,
+                      "size": size,
+                      "sha256": sha256,
+                      "minOSVersion": "16.0"
+                  }]
+              }]
+          }
+
+          with open("dist/build.json", "w") as f:
+              json.dump(build_meta, f, indent=2)
               f.write("\n")
+          with open("dist/source.json", "w") as f:
+              json.dump(feed, f, indent=2)
+              f.write("\n")
+
+          v = feed["apps"][0]["versions"][0]
+          assert v["version"] == build_meta["version"]
+          assert v["buildVersion"] == build_meta["build"]
+          assert v["size"] == build_meta["size"]
+          assert v["sha256"] == build_meta["sha256"]
+          assert v["downloadURL"] == build_meta["download_url"]
           PY
+
+          test "$(stat -f%z dist/AthleteOSRecorder.ipa)" = "$RECORDER_SIZE"
+          test "$(shasum -a 256 dist/AthleteOSRecorder.ipa | awk '{print $1}')" = "$RECORDER_SHA"
+
+      - name: Publish validated feed and stable copy
+        run: |
+          set -euo pipefail
           git config user.name "Seedytim"
           git config user.email "103544048+Seedytim@users.noreply.github.com"
           git fetch origin main
-          if [ "$(git rev-parse origin/main)" != "$SOURCE" ]; then
-            echo "main changed during release; refusing to publish a stale IPA."
+          if [ "$(git rev-parse origin/main)" != "$RECORDER_SOURCE" ]; then
+            echo "main changed during release; feed will not be published."
             exit 1
           fi
+
           git add dist
-          if git diff --cached --quiet; then exit 0; fi
-          git commit -m "Publish AthleteOS Recorder ${VERSION} (${BUILD})"
+          if git diff --cached --quiet; then
+            echo "No distribution changes to publish."
+            exit 1
+          fi
+          git commit -m "Publish AthleteOS Recorder ${RECORDER_VERSION} (${RECORDER_BUILD})"
           git push origin HEAD:main
+          echo "RECORDER_PUBLICATION=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Verify published feed resolves to exact release
+        run: |
+          set -euo pipefail
+          FEED_URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${RECORDER_PUBLICATION}/dist/source.json"
+          BUILD_URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${RECORDER_PUBLICATION}/dist/build.json"
+          for attempt in 1 2 3 4 5; do
+            if curl -fL "$FEED_URL" -o /tmp/feed.json && curl -fL "$BUILD_URL" -o /tmp/build.json; then break; fi
+            sleep $((attempt * 2))
+          done
+
+          python3 - /tmp/feed.json /tmp/build.json "$RECORDER_URL" "$RECORDER_SHA" "$RECORDER_SIZE" "$RECORDER_VERSION" "$RECORDER_BUILD" <<'PY'
+          import json, sys
+          feed_path, build_path, url, sha, size, version, build = sys.argv[1:]
+          with open(feed_path) as f: feed = json.load(f)
+          with open(build_path) as f: meta = json.load(f)
+          v = feed["apps"][0]["versions"][0]
+          assert v["downloadURL"] == url == meta["download_url"]
+          assert v["sha256"] == sha == meta["sha256"]
+          assert int(v["size"]) == int(size) == int(meta["size"])
+          assert v["version"] == version == meta["version"]
+          assert v["buildVersion"] == build == meta["build"]
+          PY
