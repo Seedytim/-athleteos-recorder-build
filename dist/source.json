@@ -11,12 +11,12 @@
       "iconURL": "https://athleteos-pink-sigma.vercel.app/recorder/icon.png",
       "versions": [
         {
-          "version": "2.1.0",
-          "buildVersion": "16",
-          "date": "2026-10-06T02:54:10Z",
-          "localizedDescription": "One-button Recorder with richer raw H10 capture underneath: safety RR plus ECG, accelerometer and HR.",
-          "downloadURL": "https://raw.githubusercontent.com/Seedytim/-athleteos-recorder-build/1ef04e13fc62f06980bfa203db74d45f2cdeebc2/dist/AthleteOSRecorder.ipa",
-          "size": 4097641,
+          "version": "2.1.1",
+          "buildVersion": "17",
+          "date": "2026-10-06T03:13:34Z",
+          "localizedDescription": "Includes H10 timeout hardening: 45-second operations and 240-second stored RR reads, with reconnect retries and retained sensor data on failure.",
+          "downloadURL": "https://raw.githubusercontent.com/Seedytim/-athleteos-recorder-build/8cee9c43db709b06ee6b9cd6e3122d715c15bcab/dist/AthleteOSRecorder.ipa",
+          "size": 4097642,
           "minOSVersion": "16.0"
         }
       ]
