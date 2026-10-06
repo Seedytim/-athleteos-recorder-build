@@ -15,6 +15,10 @@ struct RawH10RRRecording: Codable {
     let sampleType: String
     let sampleEncoding: String
     let rrSamplesRaw: [UInt32]
+    // Schema 2 retains notification timing and contact flags. Never reconstruct
+    // an uninterrupted night by cumulatively summing RR across Bluetooth gaps.
+    var storageMode: String? = nil
+    var rrPackets: [ResearchHRSample]? = nil
 
     init(
         deviceId: String,
@@ -42,5 +46,25 @@ struct RawH10RRRecording: Codable {
         self.sampleType = "rr"
         self.sampleEncoding = "polar_h10_exercise_rr_ms_uint32"
         self.rrSamplesRaw = rrSamplesRaw
+    }
+
+    init(phoneId: UUID, deviceId: String, exerciseId: String, startedAt: Date,
+         stoppedAt: Date, packets: [ResearchHRSample], metadata: ResearchDeviceMetadata) {
+        schemaVersion = 2
+        id = phoneId
+        self.deviceId = deviceId
+        self.exerciseId = exerciseId
+        self.startedAt = startedAt
+        self.stoppedAt = stoppedAt
+        fetchedAt = stoppedAt
+        polarSdkVersion = metadata.polarSdkVersion
+        firmwareVersion = metadata.firmwareVersion
+        batteryPercentAtFetch = metadata.batteryPercentAtStart
+        recordingIntervalSeconds = 0
+        sampleType = "rr"
+        sampleEncoding = "polar_h10_live_hr_service_rr_packets_ms"
+        rrSamplesRaw = packets.flatMap { $0.rrMs }.map { UInt32($0) }
+        storageMode = "phone_live"
+        rrPackets = packets
     }
 }

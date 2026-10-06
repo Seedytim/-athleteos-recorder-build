@@ -41,10 +41,58 @@ struct RecorderRegression {
         try await testCleanupJournal(raw: raw, sha: sha, id: id)
         try await testResearchCaptureStore()
         try await testEpisodeCaptureIsolation()
+        try await testPhoneOwnedCapture()
         #if canImport(Combine) && canImport(Security) && canImport(CryptoKit)
         try await testUploaderTransport(raw: raw)
         #endif
         print("PASS: verified archive receipts only, SHA must match, raw samples preserved, queue files discoverable and independently deletable")
+    }
+
+    static func testPhoneOwnedCapture() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let captures = ResearchCaptureStore(root: root, chunkLimitBytes: 100)
+        let rrStore = RecordingStore(root: root, digest: { _ in String(repeating: "a", count: 64) })
+        let id = UUID(), episode = "LIVE_" + id.uuidString
+        let start = Date(timeIntervalSince1970: 1000)
+        let metadata = ResearchDeviceMetadata(deviceId: "H10", model: "Polar H10", firmwareVersion: nil,
+            polarSdkVersion: "test", appVersion: "test", appBuild: "test", internalRRExerciseId: episode, batteryPercentAtStart: 90)
+        let first = try await captures.ensureEpisodeCapture(metadata: metadata, channels: [], episodeStartedAt: start, now: start)
+        func packet(_ seconds: Double, _ values: [Int]) -> ResearchHRSample {
+            ResearchHRSample(receivedAt: start.addingTimeInterval(seconds), bpm: 60, rrMs: values,
+                rrAvailable: true, contactStatus: true, contactStatusSupported: true,
+                receivedAtUnixMs: start.addingTimeInterval(seconds).timeIntervalSince1970 * 1000)
+        }
+        try await captures.appendHR([packet(1, [1000]), packet(2, [1000])], captureId: first)
+        // Calling recovery in a live process cannot close its active capture.
+        let recovered = try await captures.recoverInterruptedCaptures(now: start.addingTimeInterval(3))
+        precondition(recovered == 0)
+        let activeId = await captures.activeCaptureId()
+        precondition(activeId == first)
+        _ = try await captures.finish(state: .interrupted, batteryPercentAtEnd: 90, endedAt: start.addingTimeInterval(3))
+        let second = try await captures.ensureEpisodeCapture(metadata: metadata, channels: [], episodeStartedAt: start, now: start.addingTimeInterval(20))
+        try await captures.appendHR([packet(21, [1000]), packet(22, [999, 1001])], captureId: second)
+        _ = try await captures.finish(batteryPercentAtEnd: 89, endedAt: start.addingTimeInterval(23))
+        let raw = try await captures.phoneEpisodeRecording(id: id, episodeId: episode, startedAt: start, endedAt: start.addingTimeInterval(23))
+        precondition(raw.schemaVersion == 2 && raw.storageMode == "phone_live")
+        precondition(raw.rrSamplesRaw == [1000, 1000, 1000, 999, 1001], "Equal RR values are separate heartbeats, not duplicates")
+        precondition(raw.rrPackets?.count == 4, "Crash/reconnect segments must all remain in the phone episode")
+        precondition(raw.rrPackets?[2].receivedAtUnixMs == start.addingTimeInterval(21).timeIntervalSince1970 * 1000)
+        let archives = try await captures.pendingArchives()
+        precondition(archives.allSatisfy { $0.manifest.recordingMode == "phone_live" })
+        precondition(archives.flatMap(\.manifest.files).filter { $0.channel == "hr" }.count >= 4, "HR chunks must stay below upload size limits")
+        let file = try await rrStore.save(raw)
+        let receipt = VerifiedArchiveReceipt(recordingID: UUID().uuidString, sha256: String(repeating: "a", count: 64), processingState: "complete")
+        _ = try await rrStore.confirmArchive(file, receipt: receipt)
+        let sensorJobs = try await rrStore.readySensorCleanups()
+        precondition(sensorJobs.isEmpty, "Phone-owned nights must never delete an H10 exercise")
+        let source = try String(contentsOfFile: "Sources/PolarH10Recorder.swift", encoding: .utf8)
+        let begin = source.range(of: "func performNightAction() async {")!
+        let end = source.range(of: "func recoverLegacySensorNight() async {", range: begin.upperBound..<source.endIndex)!
+        let phonePath = String(source[begin.lowerBound..<end.lowerBound])
+        precondition(!phonePath.contains("api.startRecording") && !phonePath.contains("requestRecordingStatus") && !phonePath.contains("fetchExercise"), "New phone path must not depend on H10 memory")
+        precondition(phonePath.contains("if phoneNightPending { await finishPhoneNight(); return }"), "End must precede Bluetooth readiness checks")
+        print("PASS: phone RR chunks, interrupted segments, raw values, explicit gaps, stable export identity, no sensor cleanup or PFTP dependence")
     }
 
     static func testEpisodeCaptureIsolation() async throws {

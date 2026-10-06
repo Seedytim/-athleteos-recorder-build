@@ -1,5 +1,32 @@
 # AthleteOS Recorder build mirror
 
+## Phone-owned live recording (unreleased)
+
+New nights stream RR through the Bluetooth Heart Rate Service alongside ECG and
+accelerometer data. All three channels must produce fresh packets before the UI
+claims a healthy recording. No H10 exercise is started, fetched, or deleted by
+the new night action. Old sensor recordings remain in the explicit legacy
+recovery path; installing this change does not erase them.
+
+RR notifications, receipt times and contact flags are saved in bounded local
+chunks. ECG/ACC and HR writes are flushed at most approximately every five
+seconds or 64 KiB. End night works without a Bluetooth connection and creates a
+stable schema-2 RR export containing every interrupted segment for that night.
+Upload retries are idempotent and local deletion requires exact SHA receipts.
+The companion backend schema-2 parser must deploy before releasing this app.
+
+Keep Bluetooth on, the phone nearby, and Recorder running (screen lock is fine;
+do not force-quit). A lost BLE connection, phone shutdown, or terminated process
+can lose new samples. Received durable chunks survive; missed samples cannot be
+recovered without sensor buffering. The app reconnects where iOS permits it and
+does not fabricate coverage. Live RR beat times are estimates anchored to host
+notification receipt, not device-timestamped ECG R peaks.
+
+Acceptance gate: locked-screen capture, a 20-second BLE interruption, app
+termination/relaunch, End with BLE off, offline upload/retry, and one full-night
+run. Native CI alone cannot prove these physical-device behaviours. This branch
+does not change the IPA or SideStore feed and is not approved for release.
+
 This public repository exists only to build the unsigned **AthleteOS Recorder** iPhone app with GitHub-hosted macOS runners.
 
 It intentionally contains only the native Recorder client source and build workflow. It does **not** contain AthleteOS database credentials, private coaching data, Supabase service keys, ingest tokens, or private AthleteOS application source.

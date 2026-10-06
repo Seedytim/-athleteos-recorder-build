@@ -32,7 +32,7 @@ struct ContentView: View {
 
     private var sensorBusy: Bool { actionGate.running || recorder.nightActionInProgress || recorder.fetchInProgress || recorder.pftpOperationInProgress || recorder.recoveringConnection }
     private var busy: Bool { sensorBusy || uploader.busy }
-    private var ready: Bool { recorder.h10RecordingFeatureReady && recorder.fileTransferFeatureReady }
+    private var ready: Bool { recorder.phoneStreamsReady }
     private var uploaded: Bool {
         guard let file = recorder.lastSavedFile else { return false }
         return uploader.isUploaded(file)
@@ -41,10 +41,8 @@ struct ContentView: View {
         if recorder.fetchInProgress { return "Saving your recording" }
         if uploader.busy { return uploader.isConnected ? "Uploading your recording" : "Connecting to AthleteOS" }
         if sensorBusy { return "Talking to your H10" }
-        if recorder.stoppedRecordingAwaitingFetch { return "Recording ready to save" }
-        if recorder.recordingOngoing { return "Recording on H10" }
+        if recorder.phoneNightPending { return recorder.rawStreamActive ? "Recording on iPhone" : (recorder.phoneNightEndedAt != nil ? "Night ready to save" : "Recording interrupted") }
         if recorder.lastSavedFile != nil { return uploaded ? "Recording archived" : "Recording saved" }
-        if recorder.pendingFetchAvailable { return "Recording on your H10" }
         if recorder.connectionState == .connecting { return "Connecting your H10" }
         if recorder.connectionState == .connected && !ready { return recorder.preparationTimedOut ? "Let’s reconnect your H10" : "Preparing your H10" }
         if uploader.lastUploadedRecordingId != nil && savedFiles.isEmpty { return "Night archived" }
@@ -54,10 +52,8 @@ struct ContentView: View {
         if recorder.fetchInProgress { return "Keep your H10 nearby while the raw recording is saved to your phone." }
         if uploader.busy { return uploader.statusText }
         if sensorBusy { return recorder.statusText }
-        if recorder.stoppedRecordingAwaitingFetch { return "The H10 recording is stopped and retained. Tap End night to retry saving it to your phone." }
-        if recorder.recordingOngoing { return "Your sensor is recording independently. Reconnect when you’re ready to finish." }
+        if recorder.phoneNightPending { return recorder.phoneNightEndedAt != nil ? "Tap End night to retry local saving. Received data is retained." : "RR, ECG and movement save continuously on this iPhone. Keep Bluetooth on and your phone nearby. Do not force-close Recorder." }
         if recorder.lastSavedFile != nil { return uploaded ? "AthleteOS has verified the raw recording." : "Your raw file is safe on this phone and will archive when AthleteOS is connected." }
-        if recorder.pendingFetchAvailable { return "Reconnect to check or finish the recording and save it to your phone." }
         if recorder.connectionState == .connected && !ready { return recorder.preparationMessage }
         if uploader.lastUploadedRecordingId != nil && savedFiles.isEmpty { return uploader.statusText }
         return ready ? "Your Polar H10 is ready to record RR intervals." : "Wear your H10 with the strap moistened, then connect to begin."
@@ -65,9 +61,9 @@ struct ContentView: View {
     private var actionTitle: String {
         if actionGate.running { return nightActionWasEnd ? "Ending night…" : "Starting night…" }
         if recorder.fetchInProgress { return "Ending night…" }
-        if sensorBusy { return recorder.pendingFetchAvailable ? "Ending night…" : "Starting night…" }
-        if recorder.connectionState == .connecting { return recorder.pendingFetchAvailable ? "Connecting to end night…" : "Connecting…" }
-        if recorder.recordingOngoing || recorder.pendingFetchAvailable { return "End night" }
+        if sensorBusy { return recorder.phoneNightPending ? "Saving night…" : "Starting night…" }
+        if recorder.phoneNightPending { return "End night" }
+        if recorder.connectionState == .connecting { return "Connecting…" }
         if recorder.connectionState == .disconnected { return recorder.deviceId.isEmpty ? "Set up H10" : "Start night" }
         if !ready { return "Start night" }
         return "Start night"
@@ -75,7 +71,7 @@ struct ContentView: View {
     private var actionIcon: String {
         if recorder.lastSavedFile != nil && !uploaded && recorder.connectionState != .connected { return "antenna.radiowaves.left.and.right" }
         if recorder.connectionState != .connected { return "antenna.radiowaves.left.and.right" }
-        return recorder.recordingOngoing || recorder.pendingFetchAvailable ? "stop.fill" : "play.fill"
+        return recorder.phoneNightPending ? "stop.fill" : "play.fill"
     }
 
     var body: some View {
@@ -94,7 +90,13 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, minHeight: 60)
                     }
                     .buttonStyle(MidnightPrimaryButton())
-                    .disabled(sensorBusy || !recorder.bluetoothOn)
+                    .disabled(sensorBusy || (!recorder.bluetoothOn && !recorder.phoneNightPending))
+                    if recorder.phoneNightPending {
+                        Label(recorder.rawStreamStatus, systemImage: recorder.rawStreamActive ? "waveform" : "exclamationmark.triangle")
+                            .font(.footnote).foregroundStyle(recorder.rawStreamActive ? Midnight.mint : .orange)
+                        Text("\(ByteCountFormatter.string(fromByteCount: Int64(recorder.rawCaptureBytes), countStyle: .file)) received and saved")
+                            .font(.caption).foregroundStyle(Midnight.secondary)
+                    }
                     nearbySensors
                     if let error = recorder.lastError { notice(error, icon: "exclamationmark.triangle", color: .orange) }
                     if let error = uploader.lastError { notice(error, icon: "icloud.slash", color: .orange) }
@@ -193,7 +195,7 @@ struct ContentView: View {
         }
     }
     private var connectionLabel: String {
-        if recorder.recordingOngoing && recorder.connectionState == .disconnected { return "Recording offline" }
+        if recorder.phoneNightPending && recorder.connectionState == .disconnected { return "Gap · reconnecting" }
         if recorder.scanning { return "Searching" }
         return recorder.connectionState.rawValue
     }
@@ -284,8 +286,7 @@ struct ContentView: View {
             .fixedSize(horizontal: false, vertical: true).padding(16).frame(maxWidth: .infinity, alignment: .leading).midnightCard()
     }
     private func syncReminders() {
-        notifications.syncNight(pending: recorder.recordingOngoing || recorder.pendingFetchAvailable,
-            startedAt: UserDefaults.standard.object(forKey: "h10.startedAt") as? Date)
+        notifications.syncNight(pending: recorder.phoneNightPending, startedAt: recorder.phoneNightStartedAt)
     }
 
     private func consumeWidgetAction() {
@@ -296,7 +297,7 @@ struct ContentView: View {
 
     private func primaryAction() {
         guard actionGate.begin() else { return }
-        nightActionWasEnd = recorder.recordingOngoing || recorder.pendingFetchAvailable
+        nightActionWasEnd = recorder.phoneNightPending
         Task {
             defer { actionGate.finish() }
             await notifications.refreshAuthorization()
@@ -306,12 +307,12 @@ struct ContentView: View {
             }
             await recorder.performNightAction()
             syncReminders()
-            let night = recorder.currentExerciseId ?? "setup"
+            let night = recorder.phoneNightId ?? "setup"
             if let error = recorder.lastError {
                 await notifications.event(key: "action-\(night)", title: "Recorder needs your attention", body: error)
-            } else if recorder.recordingOngoing {
+            } else if recorder.recordingOngoing && recorder.rawStreamActive {
                 await notifications.event(key: "started-\(night)", title: "Night recording confirmed",
-                    body: "Your H10 confirmed recording. It can record independently of your phone.")
+                    body: "Live RR, ECG and movement confirmed. Keep Bluetooth on and the phone nearby; do not force-close Recorder.")
             }
             await processPendingUploads()
             if let file = recorder.lastSavedFile, !uploader.isConnected {
@@ -335,7 +336,7 @@ struct ContentView: View {
             recorder.markArchiveConfirmedAndLocalDeleted(for: file, identity: identity)
             syncReminders()
             await notifications.event(key: "archived-\(receipt.recordingID)", title: "Night safely archived",
-                body: "AthleteOS verified your raw recording. The iPhone copy has been removed; H10 cleanup runs when connected.")
+                body: "AthleteOS verified your raw RR recording. The iPhone RR export has been removed; ECG/movement archives retry independently.")
             await recorder.cleanupQueuedSensorCopies()
             await refreshSavedFiles()
         } catch {
@@ -364,6 +365,7 @@ struct ContentView: View {
                 let researchStore = ResearchCaptureStore.shared
                 let captures = try await researchStore.pendingArchives()
                 for capture in captures {
+                    if capture.manifest.device.internalRRExerciseId == recorder.phoneNightId { continue }
                     if Task.isCancelled || !uploader.isConnected { break }
                     guard await uploader.uploadResearchCapture(capture) != nil else { break }
                     try await researchStore.deleteVerifiedArchive(capture)
@@ -386,7 +388,7 @@ struct ContentView: View {
                         }.disabled(!recorder.bluetoothOn || busy)
                         if !recorder.deviceId.isEmpty { Button("Reconnect saved H10") { recorder.connect() }.disabled(busy) }
                     } else {
-                        Button("Disconnect H10") { recorder.disconnect() }.disabled(sensorBusy)
+                        Button("Disconnect H10") { recorder.disconnect() }.disabled(sensorBusy || recorder.phoneNightPending)
                         Button("Refresh recording status") { Task { await recorder.refreshRecordingStatus() } }.disabled(!ready || sensorBusy)
                     }
                 }
@@ -434,13 +436,13 @@ struct ContentView: View {
                 Section("Sensor storage") {
                     if recorder.pendingFetchAvailable {
                         Button("Stop, fetch & save") {
-                            Task { await recorder.stopFetchAndSave(); if let file = recorder.lastSavedFile, uploader.isConnected { await upload(file) } }
+                            Task { await recorder.recoverLegacySensorNight(); if let file = recorder.lastSavedFile, uploader.isConnected { await upload(file) } }
                         }.disabled(!ready || busy)
                     }
                     if recorder.pendingSensorCleanupCount > 0 {
                         Text("\(recorder.pendingSensorCleanupCount) archived H10 recording(s) waiting for automatic cleanup.").font(.footnote)
                     }
-                    Text("H10 copies are removed automatically only after AthleteOS verifies the exact raw file. Cleanup retries when the H10 reconnects.").font(.footnote).foregroundStyle(.secondary)
+                    Text("New nights record only on your iPhone. Old H10 recordings remain available for explicit recovery; no new sensor memory recording is created.").font(.footnote).foregroundStyle(.secondary)
                 }
                 Section("Diagnostics") {
                     Text(recorder.statusText).font(.footnote).textSelection(.enabled)

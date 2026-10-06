@@ -12,6 +12,7 @@ struct ArchivedSensorCleanup: Codable, Sendable {
     let fileName: String
     let identity: SensorRecordingIdentity
     let receipt: VerifiedArchiveReceipt
+    var sensorStored: Bool? = nil
 }
 
 struct SavedRecordingFile: Identifiable, Sendable {
@@ -92,7 +93,9 @@ actor RecordingStore {
         let data = try Data(contentsOf: url)
         guard try digest(data) == receipt.sha256 else { throw StoreError.archiveMismatch }
         let identity = try sensorIdentity(for: url)
-        let job = ArchivedSensorCleanup(fileName: url.lastPathComponent, identity: identity, receipt: receipt)
+        let raw = try JSONDecoder.iso8601.decode(RawH10RRRecording.self, from: data)
+        let job = ArchivedSensorCleanup(fileName: url.lastPathComponent, identity: identity, receipt: receipt,
+            sensorStored: raw.storageMode != "phone_live")
         let directory = try journalDirectory()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let journal = directory.appendingPathComponent(job.fileName)
@@ -115,7 +118,12 @@ actor RecordingStore {
                 guard try digest(Data(contentsOf: raw)) == job.receipt.sha256 else { throw StoreError.archiveMismatch }
                 try delete(raw)
             }
-            ready.append(job)
+            if job.sensorStored == false {
+                // Phone-only episodes must never issue an H10 delete request.
+                try delete(url)
+            } else {
+                ready.append(job)
+            }
         }
         return ready
     }

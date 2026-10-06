@@ -19,6 +19,7 @@ struct ResearchHRSample: Codable, Sendable, Equatable {
     let rrAvailable: Bool
     let contactStatus: Bool
     let contactStatusSupported: Bool
+    var receivedAtUnixMs: Double? = nil
 }
 
 struct ResearchChannelDescriptor: Codable, Sendable, Equatable {
@@ -78,6 +79,7 @@ struct ResearchCaptureManifest: Codable, Sendable, Equatable {
     var captureQuality: String? = nil
     /// RR episode origin; startedAt remains the actual start of this raw segment.
     var episodeStartedAt: Date? = nil
+    var recordingMode: String? = nil
 }
 
 struct ResearchCaptureEvent: Codable, Sendable, Equatable {
@@ -211,7 +213,9 @@ actor ResearchCaptureStore {
             batteryPercentAtEnd: nil,
             deviceTimestampEpoch: "2000-01-01T00:00:00Z",
             hostTimestampEncoding: "ISO-8601 UTC",
-            internalRRRole: "independent safety/master record; never deleted because research streaming fails",
+            internalRRRole: metadata.internalRRExerciseId.hasPrefix("LIVE_")
+                ? "phone-owned live RR; no H10 internal recording; Bluetooth gaps are unrecoverable"
+                : "independent safety/master record; never deleted because research streaming fails",
             rawValuePolicy: "raw sensor values are preserved unchanged; any future cleaning must be stored separately with provenance",
             channels: channels,
             files: []
@@ -226,7 +230,9 @@ actor ResearchCaptureStore {
         )
         try writeManifest(capture.manifest, to: manifestURL)
         active = capture
-        try appendEvent(kind: "capture_started", detail: "High-resolution research capture started after internal RR confirmation.", at: startedAt)
+        active?.manifest.recordingMode = metadata.internalRRExerciseId.hasPrefix("LIVE_") ? "phone_live" : "sensor_stored"
+        if let active { try writeManifest(active.manifest, to: manifestURL) }
+        try appendEvent(kind: "capture_started", detail: "Raw capture started; recording mode is explicit in the manifest.", at: startedAt)
         capture = active ?? capture
         return ResearchCaptureSummary(captureId: captureId, directory: directory, totalBytes: 0, fileCount: capture.manifest.files.count)
     }
@@ -244,6 +250,8 @@ actor ResearchCaptureStore {
             includingPropertiesForKeys: [.isDirectoryKey],
             options: [.skipsHiddenFiles]
         ) {
+            // Repeated foreground recovery must never finalize a live writer.
+            if active?.directory == captureDir { continue }
             let values = try captureDir.resourceValues(forKeys: [.isDirectoryKey])
             guard values.isDirectory == true else { continue }
             let manifestURL = captureDir.appendingPathComponent("manifest.json")
@@ -269,6 +277,24 @@ actor ResearchCaptureStore {
                 }
                 manifest.files[index].byteCount = validSize
                 manifest.files[index].recordCount = validSize / UInt64(recordSize)
+            }
+
+            // A crash can leave a partial NDJSON line and stale manifest counts.
+            // Keep only complete records, then recount from durable bytes.
+            for index in manifest.files.indices where manifest.files[index].recordEncoding.hasPrefix("ndjson:") {
+                let rawURL = captureDir.appendingPathComponent(manifest.files[index].fileName)
+                guard FileManager.default.fileExists(atPath: rawURL.path) else { continue }
+                let bytes = try Data(contentsOf: rawURL)
+                let validEnd = bytes.lastIndex(of: 0x0A).map { $0 + 1 } ?? 0
+                if validEnd < bytes.count {
+                    let handle = try FileHandle(forWritingTo: rawURL)
+                    try handle.truncate(atOffset: UInt64(validEnd))
+                    try handle.synchronize()
+                    try handle.close()
+                    repairDetails.append("\(manifest.files[index].fileName): trimmed incomplete NDJSON tail")
+                }
+                manifest.files[index].byteCount = UInt64(validEnd)
+                manifest.files[index].recordCount = UInt64(bytes.prefix(validEnd).filter { $0 == 0x0A }.count)
             }
 
             let event = ResearchCaptureEvent(
@@ -299,7 +325,10 @@ actor ResearchCaptureStore {
         if let capture = active {
             if capture.manifest.device.deviceId == metadata.deviceId &&
                 capture.manifest.device.internalRRExerciseId == metadata.internalRRExerciseId {
-                try appendEvent(kind: "gap_ended", detail: "Matching episode resumed.", at: now)
+                active?.manifest.channels = channels
+                if let active { try writeManifest(active.manifest, to: active.manifestURL) }
+                // Packet confirmation, not starting subscriptions, closes a gap.
+                try appendEvent(kind: "stream_setup", detail: "Matching episode subscriptions prepared; awaiting fresh packets.", at: now)
                 return capture.manifest.captureId
             }
             try appendEvent(kind: "episode_identity_changed", detail: "Retaining previous segment; a different RR episode is starting.", at: now)
@@ -316,6 +345,7 @@ actor ResearchCaptureStore {
     }
 
     func appendECG(_ samples: [ResearchECGSample], captureId: UUID? = nil) throws {
+        try Task.checkCancellation()
         try validateCapture(captureId)
         guard !samples.isEmpty else { return }
         var data = Data(capacity: samples.count * 12)
@@ -327,6 +357,7 @@ actor ResearchCaptureStore {
     }
 
     func appendACC(_ samples: [ResearchACCSample], captureId: UUID? = nil) throws {
+        try Task.checkCancellation()
         try validateCapture(captureId)
         guard !samples.isEmpty else { return }
         var data = Data(capacity: samples.count * 20)
@@ -340,10 +371,17 @@ actor ResearchCaptureStore {
     }
 
     func appendHR(_ samples: [ResearchHRSample], captureId: UUID? = nil) throws {
+        try Task.checkCancellation()
         try validateCapture(captureId)
         guard !samples.isEmpty else { return }
         for sample in samples {
-            try appendLine(try lineEncoder.encode(sample), toActiveNamedFile: "hr.ndjson", channel: "hr", recordEncoding: "ndjson:ResearchHRSample")
+            if active?.manifest.recordingMode == "phone_live" {
+                var line = try lineEncoder.encode(sample)
+                line.append(0x0A)
+                try appendBinary(channel: "hr", recordEncoding: "ndjson:ResearchHRSample", data: line, recordCount: 1)
+            } else {
+                try appendLine(try lineEncoder.encode(sample), toActiveNamedFile: "hr.ndjson", channel: "hr", recordEncoding: "ndjson:ResearchHRSample")
+            }
         }
     }
 
@@ -376,10 +414,11 @@ actor ResearchCaptureStore {
         guard var capture = active else { throw StoreError.noActiveCapture }
 
         for (_, writer) in capture.writers {
-            try? writer.handle.synchronize()
-            try? writer.handle.close()
+            try writer.handle.synchronize()
         }
+        for (_, writer) in capture.writers { try? writer.handle.close() }
         capture.writers.removeAll()
+        active?.writers.removeAll()
 
         capture.manifest.state = state.rawValue
         capture.manifest.endedAt = endedAt
@@ -400,6 +439,35 @@ actor ResearchCaptureStore {
 
     func activeCaptureId() -> UUID? {
         active?.manifest.captureId
+    }
+
+    /// Export received RR notifications, not an H10 memory file. Stable episode
+    /// identity makes retries byte-identical. Every interrupted segment is kept.
+    func phoneEpisodeRecording(id: UUID, episodeId: String, startedAt: Date, endedAt: Date) throws -> RawH10RRRecording {
+        let segments = try pendingArchives().filter { $0.manifest.device.internalRRExerciseId == episodeId }
+        guard let first = segments.first else { throw StoreError.invalidManifest }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        var packets: [ResearchHRSample] = []
+        for segment in segments {
+            for file in segment.files where file.channel == "hr" {
+                let bytes = try Data(contentsOf: file.url)
+                for line in bytes.split(separator: 0x0A) {
+                    let packet = try decoder.decode(ResearchHRSample.self, from: Data(line))
+                    guard packet.rrMs.allSatisfy({ $0 >= 0 && UInt64($0) <= UInt64(UInt32.max) }) else { throw StoreError.invalidManifest }
+                    packets.append(packet)
+                }
+            }
+        }
+        // Keep file order within each capture; do not deduplicate equal RR values.
+        packets = packets.enumerated().sorted {
+            let a = $0.element.receivedAtUnixMs ?? $0.element.receivedAt.timeIntervalSince1970 * 1000
+            let b = $1.element.receivedAtUnixMs ?? $1.element.receivedAt.timeIntervalSince1970 * 1000
+            return a == b ? $0.offset < $1.offset : a < b
+        }.map(\.element)
+        return RawH10RRRecording(phoneId: id, deviceId: first.manifest.device.deviceId,
+            exerciseId: episodeId, startedAt: startedAt, stoppedAt: endedAt,
+            packets: packets, metadata: first.manifest.device)
     }
 
     func activeSummary() -> ResearchCaptureSummary? {
