@@ -11,12 +11,12 @@
       "iconURL": "https://athleteos-pink-sigma.vercel.app/recorder/icon.png",
       "versions": [
         {
-          "version": "2.1.4",
-          "buildVersion": "21",
-          "date": "2026-10-06T17:34:56Z",
-          "localizedDescription": "Faster and more reliable morning save: reads the H10 file directly first, reconnects only on actual transfer failure, uses PS-FTP-only readiness after stop, and keeps retries/timeouts bounded while preserving the sensor copy.",
-          "downloadURL": "https://raw.githubusercontent.com/Seedytim/-athleteos-recorder-build/4756daf488f10480fe82d61eda70b26e0d424f61/dist/AthleteOSRecorder.ipa",
-          "size": 4136137,
+          "version": "2.1.5",
+          "buildVersion": "22",
+          "date": "2026-10-06T18:16:20Z",
+          "localizedDescription": "Fixes Polar SDK error 2/3 during morning save by using the connected CoreBluetooth peripheral UUID for stored-file reads and explicitly recovering a lost SDK/GATT session before retrying. The H10 sensor copy remains untouched until AthleteOS verifies upload.",
+          "downloadURL": "https://raw.githubusercontent.com/Seedytim/-athleteos-recorder-build/430764e95897ed167f09d414ff7a62b463bfb9c2/dist/AthleteOSRecorder.ipa",
+          "size": 4143388,
           "minOSVersion": "16.0"
         }
       ]
