@@ -214,7 +214,21 @@ struct RecorderRegression {
         try await restarted.appendECG([ResearchECGSample(deviceTimestampNs: 50, voltageMicrovolts: 505)])
         let finished = try await restarted.finish(state: .completed, batteryPercentAtEnd: 88, endedAt: Date(timeIntervalSince1970: 400))
         precondition(finished.captureId == second.captureId && finished.totalBytes >= 12)
-        print("PASS: research raw chunks rotate durably, preserve exact sensor values, expose gaps, and recover interrupted sessions")
+
+        let pendingArchives = try await restarted.pendingArchives()
+        precondition(pendingArchives.count == 2, "Interrupted and completed raw stream segments must both remain archiveable")
+        guard let completedArchive = pendingArchives.first(where: { $0.captureId == second.captureId }) else {
+            preconditionFailure("Completed raw stream capture must remain discoverable")
+        }
+        let archiveNames = Set(completedArchive.files.map(\.fileName))
+        precondition(archiveNames.contains("manifest.json") && archiveNames.contains("events.ndjson") && archiveNames.contains("ecg-0000.bin"),
+                     "Archive plan must include provenance and exact raw chunks")
+        try await restarted.deleteVerifiedArchive(completedArchive)
+        let afterVerifiedDelete = try await restarted.pendingArchives()
+        precondition(afterVerifiedDelete.count == 1 && afterVerifiedDelete[0].captureId == summary.captureId,
+                     "Verified cleanup must delete only the selected raw stream capture")
+
+        print("PASS: research raw chunks rotate durably, preserve exact sensor values, expose gaps, recover interruptions, and clean up only after verified archive")
     }
 
 
