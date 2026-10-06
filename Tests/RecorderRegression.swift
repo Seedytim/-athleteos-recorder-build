@@ -180,8 +180,8 @@ struct RecorderRegression {
         let fetchBody = String(source[fetchStart.lowerBound..<persistStart.lowerBound])
         precondition(fetchBody.contains("let maxAttempts = 3"),
                      "Morning fetch retries must stay bounded")
-        precondition(fetchBody.contains("fetchExerciseWithTimeout(directEntry, seconds: 60)"),
-                     "Direct H10 RR read must not regress to a multi-minute per-attempt timeout")
+        precondition(fetchBody.contains("fetchExerciseAcrossKnownSessions(directEntry, seconds: 60)"),
+                     "Direct H10 RR read must stay on the bounded 60-second path")
         precondition(fetchBody.contains("try await resetConnectionForStoredFetch()"),
                      "Reconnect must remain available as recovery after an actual read failure")
         precondition(fetchBody.contains("isPolarSessionUnavailable(error)"),
@@ -203,8 +203,8 @@ struct RecorderRegression {
 
         precondition(source.contains("sdkSessionIdentifier = identifier.address.uuidString"),
                      "Connected peripheral UUID must be captured for stable SDK session lookup")
-        precondition(source.contains("let sensorId = preferredSdkIdentifier"),
-                     "Stored-file operations must prefer the CoreBluetooth peripheral UUID")
+        precondition(source.contains("let sensorId = identifier ?? preferredSdkIdentifier"),
+                     "Stored-file operations must support explicit session identifiers with UUID preference")
         precondition(source.contains("case .deviceNotConnected, .deviceNotFound:"),
                      "Polar error 2/3 must be classified as session loss")
         precondition(source.contains("try await Task.sleep(for: .seconds(2))"),
