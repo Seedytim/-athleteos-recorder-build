@@ -19,6 +19,6 @@ jobs:
       - uses: actions/checkout@v4
       - name: Portable lifecycle and connection regressions
         run: |
-          swiftc Sources/NightConnectionPolicy.swift Sources/RecordingModels.swift Sources/RecordingStore.swift Sources/ResearchCaptureStore.swift Sources/UploadReceipt.swift Tests/RecorderRegression.swift -o /tmp/recorder-regression
+          swiftc Sources/NightConnectionPolicy.swift Sources/StreamHealthPolicy.swift Sources/RecordingModels.swift Sources/RecordingStore.swift Sources/ResearchCaptureStore.swift Sources/UploadReceipt.swift Tests/RecorderRegression.swift -o /tmp/recorder-regression
           /tmp/recorder-regression
           swiftc -frontend -parse Sources/*.swift Tests/RecorderRegression.swift
