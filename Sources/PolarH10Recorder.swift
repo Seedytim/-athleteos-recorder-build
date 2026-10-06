@@ -681,7 +681,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
             await fetchAndSaveStoredRecording(stoppedAt: stoppedAt ?? Date())
         } catch {
             pendingFetchAvailable = true
-            fail("Stop/fetch/save failed: \(friendlyError(error)). Sensor copy retained; tap End night to retry.")
+            fail("Stop/fetch/save failed: \\(friendlyError(error)). Sensor copy retained; tap End night to retry.")
         }
     }
 
@@ -716,7 +716,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
             await fetchAndSaveStoredRecording(stoppedAt: stoppedAt)
         } catch {
             pendingFetchAvailable = true
-            fail("Reconnect for fetch failed: (friendlyError(error)). Sensor copy retained; tap End night to retry.")
+            fail("Reconnect for fetch failed: \(friendlyError(error)). Sensor copy retained; tap End night to retry.")
         }
     }
 
@@ -821,8 +821,8 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                         if (isOperationNotPermitted106(error) || isPftpTimeout(error)), attempt < maxAttempts {
                             let delay = retryDelays[min(attempt - 1, retryDelays.count - 1)]
                             statusText = isPftpTimeout(error)
-                                ? "H10 RR read timed out. Resetting connection in \(delay)s…"
-                                : "H10 refused the direct RR read (Polar 106). Resetting connection in \(delay)s…"
+                                ? "H10 RR read timed out. Resetting connection in \\(delay)s…"
+                                : "H10 refused the direct RR read (Polar 106). Resetting connection in \\(delay)s…"
                             try await Task.sleep(for: .seconds(delay))
                             try await resetConnectionForStoredFetch()
                             continue
@@ -860,26 +860,26 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                 // the same reset again; the sensor copy remains safe.
                 if isStoredFetchReconnectFailure(error) {
                     pendingFetchAvailable = true
-                    fail("H10 reconnect failed: (friendlyError(error)). Sensor copy retained; tap End night to retry.")
+                    fail("H10 reconnect failed: \(friendlyError(error)). Sensor copy retained; tap End night to retry.")
                     return
                 }
 
                 if attempt < maxAttempts {
                     let delay = retryDelays[min(attempt - 1, retryDelays.count - 1)]
-                    statusText = "H10 file read did not finish. Resetting connection in (delay)s…"
+                    statusText = "H10 file read did not finish. Resetting connection in \(delay)s…"
                     try? await Task.sleep(for: .seconds(delay))
                     do {
                         try await resetConnectionForStoredFetch()
                     } catch {
                         pendingFetchAvailable = true
-                        fail("H10 reconnect failed: (friendlyError(error)). Sensor copy retained; tap End night to retry.")
+                        fail("H10 reconnect failed: \(friendlyError(error)). Sensor copy retained; tap End night to retry.")
                         return
                     }
                     continue
                 }
 
                 pendingFetchAvailable = true
-                fail("Fetch failed after (maxAttempts) attempts: (friendlyError(error)). Sensor copy retained; tap End night to retry.")
+                fail("Fetch failed after \(maxAttempts) attempts: \(friendlyError(error)). Sensor copy retained; tap End night to retry.")
                 return
             }
         }
