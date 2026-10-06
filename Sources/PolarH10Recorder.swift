@@ -814,6 +814,43 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         )
     }
 
+    private func fetchExerciseAcrossKnownSessions(
+        _ entry: PolarExerciseEntry,
+        seconds: UInt64
+    ) async throws -> PolarExerciseData {
+        var lastError: Error?
+        for identifier in storedFetchIdentifiers {
+            do {
+                return try await fetchExerciseWithTimeout(entry, seconds: seconds, identifier: identifier)
+            } catch {
+                lastError = error
+                if !isPolarSessionUnavailable(error) { throw error }
+            }
+        }
+        throw lastError ?? NSError(
+            domain: "AthleteOSRecorder",
+            code: 1013,
+            userInfo: [NSLocalizedDescriptionKey: "No usable Polar SDK session identifier was available."]
+        )
+    }
+
+    private func listExercisesAcrossKnownSessions(seconds: UInt64) async throws -> [PolarExerciseEntry] {
+        var lastError: Error?
+        for identifier in storedFetchIdentifiers {
+            do {
+                return try await listExercisesWithTimeout(seconds: seconds, identifier: identifier)
+            } catch {
+                lastError = error
+                if !isPolarSessionUnavailable(error) { throw error }
+            }
+        }
+        throw lastError ?? NSError(
+            domain: "AthleteOSRecorder",
+            code: 1014,
+            userInfo: [NSLocalizedDescriptionKey: "No usable Polar SDK session identifier was available for exercise listing."]
+        )
+    }
+
     private func fetchAndSaveStoredRecording(stoppedAt: Date) async {
         // Healthy stored RR transfers should complete quickly. Do not let a hung
         // Polar request block the morning UI for multiple minutes per attempt.
@@ -840,7 +877,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                         : "Retrying direct H10 RR read (\(attempt)/\(maxAttempts))…"
 
                     do {
-                        let exercise = try await fetchExerciseWithTimeout(directEntry, seconds: 60)
+                        let exercise = try await fetchExerciseAcrossKnownSessions(directEntry, seconds: 60)
                         try await persistFetchedExercise(exercise, entry: directEntry, stoppedAt: stoppedAt)
                         return
                     } catch {
@@ -866,7 +903,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                     }
                 }
 
-                let entries = try await listExercisesWithTimeout(seconds: 12)
+                let entries = try await listExercisesAcrossKnownSessions(seconds: 12)
                 guard !entries.isEmpty else {
                     throw NSError(
                         domain: "AthleteOSRecorder",
@@ -883,7 +920,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                 storedExerciseId = entry.entryId
                 statusText = "Stored RR file found. Reading H10…"
 
-                let exercise = try await fetchExerciseWithTimeout(entry, seconds: 60)
+                let exercise = try await fetchExerciseAcrossKnownSessions(entry, seconds: 60)
                 try await persistFetchedExercise(exercise, entry: entry, stoppedAt: stoppedAt)
                 return
             } catch {
@@ -960,8 +997,8 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         statusText = "Saved \(exercise.samples.count) raw RR samples to your phone. Sensor copy retained until AthleteOS verifies upload."
     }
 
-    private func listExercisesWithTimeout(seconds: UInt64) async throws -> [PolarExerciseEntry] {
-        let sensorId = preferredSdkIdentifier
+    private func listExercisesWithTimeout(seconds: UInt64, identifier: String? = nil) async throws -> [PolarExerciseEntry] {
+        let sensorId = identifier ?? preferredSdkIdentifier
         return try await withThrowingTaskGroup(of: [PolarExerciseEntry].self) { group in
             group.addTask { [api, sensorId] in
                 var entries: [PolarExerciseEntry] = []
@@ -993,9 +1030,10 @@ final class PolarH10Recorder: NSObject, ObservableObject {
 
     private func fetchExerciseWithTimeout(
         _ entry: PolarExerciseEntry,
-        seconds: UInt64
+        seconds: UInt64,
+        identifier: String? = nil
     ) async throws -> PolarExerciseData {
-        let sensorId = preferredSdkIdentifier
+        let sensorId = identifier ?? preferredSdkIdentifier
         return try await withThrowingTaskGroup(of: PolarExerciseData.self) { group in
             group.addTask { [api, sensorId] in
                 try await api.fetchExercise(sensorId, entry: entry)
@@ -1050,7 +1088,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
             guard !jobs.isEmpty else { return }
             let status = try await requestStatusWithTimeout()
             guard !status.ongoing else { return }
-            let entries = try await listExercisesWithTimeout(seconds: 12)
+            let entries = try await listExercisesAcrossKnownSessions(seconds: 12)
             for job in jobs where job.identity.deviceId == deviceId {
                 if let entry = entries.first(where: { $0.entryId == job.identity.exerciseId }) {
                     let sensorAPI = api
