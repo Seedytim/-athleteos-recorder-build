@@ -372,6 +372,19 @@ struct RecorderRegression {
         ]
         try await store.appendECG(ecgA)
         try await store.appendECG(ecgB)
+        let preciseNs: UInt64 = 844000000000000001
+        let streamId = UUID()
+        try await store.appendTimeAnchor(channel: "ecg", deviceTimestampNs: preciseNs,
+            hostReceivedAt: Date(timeIntervalSince1970: 100.125), captureId: summary.captureId,
+            firstDeviceTimestampNs: preciseNs - 40_000_000, hostUptimeSeconds: 20.125,
+            streamSegmentId: streamId, packetSampleCount: 6)
+        let anchorData = try Data(contentsOf: summary.directory.appendingPathComponent("time-anchors.ndjson"))
+        let anchorDecoder = JSONDecoder()
+        anchorDecoder.dateDecodingStrategy = .iso8601
+        let anchor = try anchorDecoder.decode(ResearchTimeAnchor.self, from: anchorData)
+        precondition(anchor.deviceTimestampNsExact == String(preciseNs), "JSON consumers must not round UInt64 nanoseconds")
+        precondition(anchor.hostReceivedAtUnixMs == 100125, "Subsecond host timing must survive serialization")
+        precondition(anchor.referenceSample == "last_sample_in_packet_receipt_estimate" && anchor.streamSegmentId == streamId)
         try await store.appendACC([
             ResearchACCSample(deviceTimestampNs: 10, xMilliG: -1, yMilliG: 2, zMilliG: 999)
         ])

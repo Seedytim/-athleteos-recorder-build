@@ -1525,18 +1525,22 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                     for try await batch in self.api.startEcgStreaming(self.deviceId, settings: ecgSetting) {
                         if Task.isCancelled { break }
                         let receivedAt = Date()
+                        let receivedUptime = ProcessInfo.processInfo.systemUptime
                         let samples = batch.map {
                             ResearchECGSample(deviceTimestampNs: $0.timeStamp, voltageMicrovolts: $0.voltage)
                         }
                         try await self.researchStore.appendECG(samples, captureId: captureId)
                         self.notePacket(channel: "ecg", receivedAt: receivedAt)
-                        if let first = samples.first,
-                           self.lastECGAnchorAt.map({ receivedAt.timeIntervalSince($0) >= 60 }) ?? true {
+                        if let first = samples.first, let last = samples.last {
                             try await self.researchStore.appendTimeAnchor(
                                 channel: "ecg",
-                                deviceTimestampNs: first.deviceTimestampNs,
+                                deviceTimestampNs: last.deviceTimestampNs,
                                 hostReceivedAt: receivedAt,
-                                captureId: captureId
+                                captureId: captureId,
+                                firstDeviceTimestampNs: first.deviceTimestampNs,
+                                hostUptimeSeconds: receivedUptime,
+                                streamSegmentId: streamSegmentId,
+                                packetSampleCount: samples.count
                             )
                             self.lastECGAnchorAt = receivedAt
                         }
@@ -1563,6 +1567,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                     for try await batch in self.api.startAccStreaming(self.deviceId, settings: accSetting) {
                         if Task.isCancelled { break }
                         let receivedAt = Date()
+                        let receivedUptime = ProcessInfo.processInfo.systemUptime
                         let samples = batch.map {
                             ResearchACCSample(
                                 deviceTimestampNs: $0.timeStamp,
@@ -1573,13 +1578,16 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                         }
                         try await self.researchStore.appendACC(samples, captureId: captureId)
                         self.notePacket(channel: "acc", receivedAt: receivedAt)
-                        if let first = samples.first,
-                           self.lastACCAnchorAt.map({ receivedAt.timeIntervalSince($0) >= 60 }) ?? true {
+                        if let first = samples.first, let last = samples.last {
                             try await self.researchStore.appendTimeAnchor(
                                 channel: "acc",
-                                deviceTimestampNs: first.deviceTimestampNs,
+                                deviceTimestampNs: last.deviceTimestampNs,
                                 hostReceivedAt: receivedAt,
-                                captureId: captureId
+                                captureId: captureId,
+                                firstDeviceTimestampNs: first.deviceTimestampNs,
+                                hostUptimeSeconds: receivedUptime,
+                                streamSegmentId: streamSegmentId,
+                                packetSampleCount: samples.count
                             )
                             self.lastACCAnchorAt = receivedAt
                         }

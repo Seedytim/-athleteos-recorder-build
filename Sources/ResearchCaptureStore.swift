@@ -93,6 +93,14 @@ struct ResearchTimeAnchor: Codable, Sendable, Equatable {
     let channel: String
     let deviceTimestampNs: UInt64
     let hostReceivedAt: Date
+    // UInt64 JSON numbers exceed JavaScript's exact integer range.
+    var deviceTimestampNsExact: String? = nil
+    var firstDeviceTimestampNsExact: String? = nil
+    var hostReceivedAtUnixMs: Double? = nil
+    var hostUptimeSeconds: Double? = nil
+    var streamSegmentId: UUID? = nil
+    var referenceSample: String? = nil
+    var packetSampleCount: Int? = nil
 }
 
 struct ResearchCaptureSummary: Sendable, Equatable {
@@ -392,12 +400,20 @@ actor ResearchCaptureStore {
         try appendLine(try lineEncoder.encode(event), to: active.eventsURL)
     }
 
-    func appendTimeAnchor(channel: String, deviceTimestampNs: UInt64, hostReceivedAt: Date = Date(), captureId: UUID? = nil) throws {
+    func appendTimeAnchor(channel: String, deviceTimestampNs: UInt64, hostReceivedAt: Date = Date(), captureId: UUID? = nil, firstDeviceTimestampNs: UInt64? = nil, hostUptimeSeconds: Double? = nil, streamSegmentId: UUID? = nil, packetSampleCount: Int? = nil) throws {
+        try Task.checkCancellation()
         try validateCapture(captureId)
         let anchor = ResearchTimeAnchor(
             channel: channel,
             deviceTimestampNs: deviceTimestampNs,
-            hostReceivedAt: hostReceivedAt
+            hostReceivedAt: hostReceivedAt,
+            deviceTimestampNsExact: String(deviceTimestampNs),
+            firstDeviceTimestampNsExact: firstDeviceTimestampNs.map(String.init),
+            hostReceivedAtUnixMs: hostReceivedAt.timeIntervalSince1970 * 1000,
+            hostUptimeSeconds: hostUptimeSeconds,
+            streamSegmentId: streamSegmentId,
+            referenceSample: firstDeviceTimestampNs == nil ? "legacy_unspecified" : "last_sample_in_packet_receipt_estimate",
+            packetSampleCount: packetSampleCount
         )
         try appendLine(
             try lineEncoder.encode(anchor),

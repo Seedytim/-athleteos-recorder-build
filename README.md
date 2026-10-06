@@ -2,6 +2,14 @@
 
 ## Phone-owned live recording (unreleased)
 
+ECG/ACC preserve raw sensor nanoseconds unchanged. Each packet also records exact
+nanoseconds as strings, precise host receipt milliseconds, monotonic uptime,
+packet bounds and a reconnect segment ID. Receipt time references the LAST
+sample, not the first. This is a Bluetooth receipt estimate, not hardware clock
+synchronization. The backend isolates capture clocks, refuses reset/clock-step
+anchors and never invents a clock origin when anchors are missing. Old archives
+retain their original lower-precision anchors; they are not retroactively fixed.
+
 New nights stream RR through the Bluetooth Heart Rate Service alongside ECG and
 accelerometer data. All three channels must produce fresh packets before the UI
 claims a healthy recording. No H10 exercise is started, fetched, or deleted by
