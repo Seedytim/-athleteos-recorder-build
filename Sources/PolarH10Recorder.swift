@@ -145,6 +145,9 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         let savedExerciseId = UserDefaults.standard.string(forKey: Keys.exerciseId)
         let savedFilePath = UserDefaults.standard.string(forKey: Keys.lastSavedFilePath)
         let uploadedExerciseId = UserDefaults.standard.string(forKey: Keys.uploadedExerciseId)
+        let savedPhoneId = UserDefaults.standard.string(forKey: Keys.phoneNightId)
+        let savedPhoneStart = UserDefaults.standard.object(forKey: Keys.phoneNightStartedAt) as? Date
+        let savedPhoneEnd = UserDefaults.standard.object(forKey: Keys.phoneNightEndedAt) as? Date
         self.deviceId = UserDefaults.standard.string(forKey: Keys.deviceId) ?? ""
         self.sdkSessionIdentifier = UserDefaults.standard.string(forKey: Keys.sdkSessionIdentifier) ?? ""
         self.currentExerciseId = savedExerciseId
@@ -158,11 +161,11 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         self.pendingSensorCleanupCount =
             (UserDefaults.standard.stringArray(forKey: Keys.pendingSensorCleanupIds) ?? []).count
         self.rawCaptureExpected = UserDefaults.standard.bool(forKey: Keys.rawCaptureExpected)
-        self.phoneNightId = UserDefaults.standard.string(forKey: Keys.phoneNightId)
-        self.phoneNightStartedAt = UserDefaults.standard.object(forKey: Keys.phoneNightStartedAt) as? Date
-        self.phoneNightEndedAt = UserDefaults.standard.object(forKey: Keys.phoneNightEndedAt) as? Date
-        self.recordingOngoing = self.phoneNightId != nil && self.phoneNightEndedAt == nil
-        self.rawCaptureExpected = self.recordingOngoing
+        self.phoneNightId = savedPhoneId
+        self.phoneNightStartedAt = savedPhoneStart
+        self.phoneNightEndedAt = savedPhoneEnd
+        self.recordingOngoing = savedPhoneId != nil && savedPhoneEnd == nil
+        self.rawCaptureExpected = savedPhoneId != nil && savedPhoneEnd == nil
         super.init()
 
         #if DEBUG
@@ -405,6 +408,10 @@ final class PolarH10Recorder: NSObject, ObservableObject {
 
     func recoverLegacySensorNight() async {
         guard !phoneNightPending, !nightActionInProgress else { return }
+        guard UserDefaults.standard.string(forKey: Keys.exerciseId) != nil else {
+            fail("No retained legacy H10 recording is registered. New nights use phone capture.")
+            return
+        }
         phoneMode = false
         defer { phoneMode = true }
         currentExerciseId = UserDefaults.standard.string(forKey: Keys.exerciseId)
@@ -1482,6 +1489,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
     }
 
     private func startStreamTasks(ecgSetting: PolarSensorSetting?, accSetting: PolarSensorSetting?, captureId: UUID) {
+        let streamSegmentId = UUID()
         streamWatchdogTask?.cancel()
         ecgStreamTask?.cancel()
         accStreamTask?.cancel()
@@ -1606,7 +1614,8 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                                 rrAvailable: $0.rrAvailable,
                                 contactStatus: $0.contactStatus,
                                 contactStatusSupported: $0.contactStatusSupported,
-                                receivedAtUnixMs: receivedAt.timeIntervalSince1970 * 1000
+                                receivedAtUnixMs: receivedAt.timeIntervalSince1970 * 1000,
+                                streamSegmentId: streamSegmentId
                             )
                         }
                         try await self.researchStore.appendHR(samples, captureId: captureId)

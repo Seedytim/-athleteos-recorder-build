@@ -20,6 +20,7 @@ struct ResearchHRSample: Codable, Sendable, Equatable {
     let contactStatus: Bool
     let contactStatusSupported: Bool
     var receivedAtUnixMs: Double? = nil
+    var streamSegmentId: UUID? = nil
 }
 
 struct ResearchChannelDescriptor: Codable, Sendable, Equatable {
