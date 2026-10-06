@@ -356,7 +356,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
             if rawStreamActive {
                 statusText = "Recording on iPhone. Keep Bluetooth on, H10 nearby, and do not force-close Recorder."
             } else {
-                fail("Live recording has not confirmed all three channels. Any received samples are saved; End night remains available.")
+                fail("Live recording has not confirmed both required signals (RR and movement). Any received samples are saved; End night remains available.")
                 scheduleResearchReconnect()
             }
         } catch { fail("Phone capture could not start: \(error.localizedDescription)") }
