@@ -200,6 +200,18 @@ struct RecorderRegression {
                      "Stored RR read should try both the peripheral UUID and Polar device ID")
         precondition(source.contains("listExercisesAcrossKnownSessions"),
                      "Stored exercise lookup should try both known session identifiers")
+        precondition(source.contains(".feature_polar_features_configuration_service"),
+                     "Recorder must enable Polar Features Configuration Service for dual-BLE control")
+        precondition(source.contains("getMultiBLEConnectionMode(identifier: identifier)"),
+                     "Recorder must read and verify H10 multi-BLE mode")
+        precondition(source.contains("setMultiBLEConnectionMode(identifier: identifier, enable: false)"),
+                     "Recorder must explicitly disable H10 dual-BLE mode")
+        precondition(source.contains("enforceSingleBLEConnectionMode(context: \"before overnight recording\")"),
+                     "Start night must verify single-BLE mode before creating an offline RR recording")
+        precondition(source.contains("enforceSingleBLEConnectionMode(context: \"before retained RR recovery\")"),
+                     "Retained-file recovery must verify single-BLE mode before PFTP fetch")
+        precondition(source.contains("enforceSingleBLEConnectionMode(context: \"after PFTP retry\")"),
+                     "A PFTP 106 retry must reassert single-BLE mode after reconnect")
 
         precondition(source.contains("sdkSessionIdentifier = identifier.address.uuidString"),
                      "Connected peripheral UUID must be captured for stable SDK session lookup")
@@ -220,7 +232,7 @@ struct RecorderRegression {
         precondition(!resetBody.contains("connectionState == .connected && h10RecordingFeatureReady && fileTransferFeatureReady"),
                      "Stopped-file recovery must not require the exercise-recording service callback")
 
-        print("PASS: morning save direct-first + dual identifier lookup + hard Polar SDK rebuild + verified PS-FTP recovery")
+        print("PASS: morning save + single-BLE safeguard + dual identifier lookup + hard SDK rebuild + verified PS-FTP recovery")
     }
 
     static func testCleanupJournal(raw: RawH10RRRecording, sha: String, id: String) async throws {
