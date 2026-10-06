@@ -131,8 +131,8 @@ struct ContentView: View {
             .task {
                 await recorder.prepareRawCaptureRecovery()
                 syncReminders()
-                consumeWidgetAction()
                 await notifications.refreshAuthorization()
+                consumeWidgetAction()
                 // Retry transient network/archive failures while this view is active.
                 while !Task.isCancelled {
                     if scenePhase == .active {
@@ -298,7 +298,7 @@ struct ContentView: View {
         Task {
             defer { actionGate.finish() }
             await notifications.refreshAuthorization()
-            // CoreBluetooth may still be initializing during an app cold launch.
+            // CoreBluetooth may still be initializing during a widget cold launch.
             for _ in 0..<10 where !recorder.bluetoothOn {
                 try? await Task.sleep(for: .milliseconds(200))
             }
