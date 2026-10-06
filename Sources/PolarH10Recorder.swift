@@ -728,7 +728,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                         : "Retrying direct H10 RR read (\(attempt)/\(maxAttempts))…"
 
                     do {
-                        let exercise = try await fetchExerciseWithTimeout(directEntry, seconds: 120)
+                        let exercise = try await fetchExerciseWithTimeout(directEntry, seconds: 240)
                         try await persistFetchedExercise(exercise, entry: directEntry, stoppedAt: stoppedAt)
                         return
                     } catch {
@@ -765,7 +765,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                 storedExerciseId = entry.entryId
                 statusText = "Stored RR file found. Reading H10…"
 
-                let exercise = try await fetchExerciseWithTimeout(entry, seconds: 120)
+                let exercise = try await fetchExerciseWithTimeout(entry, seconds: 240)
                 try await persistFetchedExercise(exercise, entry: entry, stoppedAt: stoppedAt)
                 return
             } catch {
@@ -1363,7 +1363,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         try await withThrowingTaskGroup(of: T.self) { group in
             group.addTask { try await operation() }
             group.addTask { [api, deviceId] in
-                try await Task.sleep(for: .seconds(25))
+                try await Task.sleep(for: .seconds(45))
                 try? api.disconnectFromDevice(deviceId)
                 throw NSError(domain: "AthleteOSRecorder", code: 1010, userInfo: [NSLocalizedDescriptionKey: "H10 operation timed out. Sensor data is retained; try again."])
             }
