@@ -110,11 +110,12 @@ final class PolarH10Recorder: NSObject, ObservableObject {
     private lazy var api: PolarBleApi = Self.makePolarApi()
 
     private func configureApi(_ candidate: PolarBleApi) {
-        candidate.observer = self
-        candidate.powerStateObserver = self
-        candidate.deviceFeaturesObserver = self
-        candidate.deviceInfoObserver = self
-        candidate.polarFilter(true)
+        var configured = candidate
+        configured.observer = self
+        configured.powerStateObserver = self
+        configured.deviceFeaturesObserver = self
+        configured.deviceInfoObserver = self
+        configured.polarFilter(true)
     }
 
     private enum Keys {
