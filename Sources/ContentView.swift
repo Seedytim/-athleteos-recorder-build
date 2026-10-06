@@ -336,7 +336,7 @@ struct ContentView: View {
             recorder.markArchiveConfirmedAndLocalDeleted(for: file, identity: identity)
             syncReminders()
             await notifications.event(key: "archived-\(receipt.recordingID)", title: "Night safely archived",
-                body: "AthleteOS verified your raw RR recording. The iPhone RR export has been removed; Movement archives retry independently.")
+                body: "AthleteOS verified your raw RR recording. The iPhone RR export has been removed; movement archives retry independently.")
             await recorder.cleanupQueuedSensorCopies()
             await refreshSavedFiles()
         } catch {
