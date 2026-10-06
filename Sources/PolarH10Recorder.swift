@@ -261,8 +261,10 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         defer { nightActionInProgress = false }
         clearError()
         await reconcileArchivedNight()
-        guard await ensureReadyForNightAction() else { return }
-        // Restore a save completed just before a crash, before touching H10 storage.
+
+        // Restore a save completed just before a crash before waiting on any
+        // Bluetooth service. A durable local save must not be held hostage by H10
+        // reconnection state.
         if let id = currentExerciseId, let files = try? await store.list() {
             for file in files {
                 if let identity = try? await store.sensorIdentity(for: file.url),
@@ -274,14 +276,26 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                 }
             }
         }
-        switch NightActionPolicy.afterRecovery(requestedEnd: requestedEnd, recordingOngoing: recordingOngoing, pendingFetch: pendingFetchAvailable) {
+
+        let operation = NightActionPolicy.afterRecovery(
+            requestedEnd: requestedEnd,
+            recordingOngoing: recordingOngoing,
+            pendingFetch: pendingFetchAvailable
+        )
+        switch operation {
         case .end:
+            // A previous End night may already have stopped the H10. In that state
+            // only PS-FTP is required; do not wait for the recording service again.
+            if stoppedRecordingAwaitingFetch {
+                await retryFetchAndSave()
+                return
+            }
+            guard await ensureReadyForNightAction() else { return }
             await stopFetchAndSave()
         case .archiveSaved:
-            // A crash may leave a durable save/receipt ahead of UserDefaults.
-            // An End press completes that night; it must never start another one.
             statusText = "Night already saved. Completing archive cleanup…"
         case .start:
+            guard await ensureReadyForNightAction() else { return }
             await startRRRecordingAndReleasePhone()
         }
     }
@@ -448,6 +462,12 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                 fail("Disconnect failed: \(error.localizedDescription)")
             }
         }
+    }
+
+    var stoppedRecordingAwaitingFetch: Bool {
+        pendingFetchAvailable &&
+        !recordingOngoing &&
+        UserDefaults.standard.object(forKey: Keys.stoppedAt) as? Date != nil
     }
 
     var preparationMessage: String {
@@ -655,10 +675,9 @@ final class PolarH10Recorder: NSObject, ObservableObject {
 
             pendingFetchAvailable = true
 
-            // Polar H10 firmware 5.0.0 can leave the PFTP session in a state where
-            // stored-exercise reads return ResponseError 106 immediately after stop.
-            // A clean BLE disconnect/reconnect resets that session reliably.
-            try await resetConnectionForStoredFetch()
+            // Fast path: use the connection that just stopped the exercise.
+            // Reconnect only if Polar actually returns PFTP 106 or the read times out.
+            statusText = "Recording stopped. Reading saved RR file…"
             await fetchAndSaveStoredRecording(stoppedAt: stoppedAt ?? Date())
         } catch {
             pendingFetchAvailable = true
@@ -668,8 +687,8 @@ final class PolarH10Recorder: NSObject, ObservableObject {
 
     func retryFetchAndSave() async {
         clearError()
-        guard h10RecordingFeatureReady else {
-            fail("Reconnect and wait until the H10 recording feature is ready.")
+        guard bluetoothOn else {
+            fail("Turn on Bluetooth and keep the H10 nearby. The sensor copy is retained.")
             return
         }
         guard !fetchInProgress, !pftpOperationInProgress else { return }
@@ -684,11 +703,20 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         let stoppedAt = (UserDefaults.standard.object(forKey: Keys.stoppedAt) as? Date) ?? Date()
 
         do {
-            try await resetConnectionForStoredFetch()
+            // Once an exercise is stopped, PS-FTP is the only service required.
+            // If it is already ready, do not reset a healthy BLE connection.
+            if !StoredFetchConnectionPolicy.ready(
+                connected: connectionState == .connected,
+                transferReady: fileTransferFeatureReady
+            ) {
+                try await resetConnectionForStoredFetch()
+            } else {
+                statusText = "H10 file transfer ready. Reading saved RR file…"
+            }
             await fetchAndSaveStoredRecording(stoppedAt: stoppedAt)
         } catch {
             pendingFetchAvailable = true
-            fail("Reconnect for fetch failed: \(friendlyError(error)). Sensor copy retained.")
+            fail("Reconnect for fetch failed: (friendlyError(error)). Sensor copy retained.")
         }
     }
 
@@ -736,27 +764,35 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         }
 
         for _ in 0..<150 {
-            if connectionState == .connected && h10RecordingFeatureReady && fileTransferFeatureReady {
-                // Do not launch requestRecordingStatus here. It uses the same PFTP
-                // transport as list/fetch and can collide with the stored-file read.
+            if StoredFetchConnectionPolicy.ready(
+                connected: connectionState == .connected,
+                transferReady: fileTransferFeatureReady
+            ) {
+                // A stored-file read needs PS-FTP only. Waiting for the exercise
+                // recording-service callback here created false morning failures.
                 statusText = "H10 file transfer ready. Settling connection…"
-                try await Task.sleep(for: .milliseconds(1200))
+                try await Task.sleep(for: .milliseconds(400))
                 statusText = "H10 reconnected. Reading stored RR recording…"
                 return
             }
             try await Task.sleep(for: .milliseconds(100))
         }
 
+        let detail = connectionState == .connected
+            ? "H10 file-transfer service did not become ready after reconnect."
+            : "H10 did not reconnect for stored-file transfer."
         throw NSError(
             domain: "AthleteOSRecorder",
             code: 1002,
-            userInfo: [NSLocalizedDescriptionKey: "H10 file-transfer service did not become ready after reconnect."]
+            userInfo: [NSLocalizedDescriptionKey: detail]
         )
     }
 
     private func fetchAndSaveStoredRecording(stoppedAt: Date) async {
-        let maxAttempts = 5
-        let retryDelays: [UInt64] = [1, 2, 4, 7]
+        // Healthy stored RR transfers should complete quickly. Do not let a hung
+        // Polar request block the morning UI for multiple minutes per attempt.
+        let maxAttempts = 3
+        let retryDelays: [UInt64] = [1, 3]
 
         for attempt in 1...maxAttempts {
             do {
@@ -778,7 +814,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                         : "Retrying direct H10 RR read (\(attempt)/\(maxAttempts))…"
 
                     do {
-                        let exercise = try await fetchExerciseWithTimeout(directEntry, seconds: 240)
+                        let exercise = try await fetchExerciseWithTimeout(directEntry, seconds: 60)
                         try await persistFetchedExercise(exercise, entry: directEntry, stoppedAt: stoppedAt)
                         return
                     } catch {
@@ -815,7 +851,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                 storedExerciseId = entry.entryId
                 statusText = "Stored RR file found. Reading H10…"
 
-                let exercise = try await fetchExerciseWithTimeout(entry, seconds: 240)
+                let exercise = try await fetchExerciseWithTimeout(entry, seconds: 60)
                 try await persistFetchedExercise(exercise, entry: entry, stoppedAt: stoppedAt)
                 return
             } catch {
