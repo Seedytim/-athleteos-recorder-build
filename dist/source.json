@@ -11,12 +11,12 @@
       "iconURL": "https://athleteos-pink-sigma.vercel.app/recorder/icon.png",
       "versions": [
         {
-          "version": "2.1.1",
-          "buildVersion": "17",
-          "date": "2026-10-06T03:13:34Z",
+          "version": "2.1.2",
+          "buildVersion": "18",
+          "date": "2026-10-06T05:18:26Z",
           "localizedDescription": "Includes H10 timeout hardening: 45-second operations and 240-second stored RR reads, with reconnect retries and retained sensor data on failure.",
-          "downloadURL": "https://raw.githubusercontent.com/Seedytim/-athleteos-recorder-build/8cee9c43db709b06ee6b9cd6e3122d715c15bcab/dist/AthleteOSRecorder.ipa",
-          "size": 4097642,
+          "downloadURL": "https://raw.githubusercontent.com/Seedytim/-athleteos-recorder-build/9fd831a083fb5f17bbe569a04bb4539955842367/dist/AthleteOSRecorder.ipa",
+          "size": 4100287,
           "minOSVersion": "16.0"
         }
       ]
