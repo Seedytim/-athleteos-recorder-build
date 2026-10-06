@@ -76,6 +76,8 @@ struct ResearchCaptureManifest: Codable, Sendable, Equatable {
     /// created by older Recorder builds without mutating their raw files.
     var channelCoverage: [String: ResearchChannelCoverage]? = nil
     var captureQuality: String? = nil
+    /// RR episode origin; startedAt remains the actual start of this raw segment.
+    var episodeStartedAt: Date? = nil
 }
 
 struct ResearchCaptureEvent: Codable, Sendable, Equatable {
@@ -120,6 +122,7 @@ actor ResearchCaptureStore {
         case captureAlreadyActive
         case noActiveCapture
         case invalidManifest
+        case staleCapture
     }
 
     enum FinalState: String {
@@ -291,7 +294,29 @@ actor ResearchCaptureStore {
         return recovered
     }
 
-    func appendECG(_ samples: [ResearchECGSample]) throws {
+    func ensureEpisodeCapture(metadata: ResearchDeviceMetadata, channels: [ResearchChannelDescriptor],
+                              episodeStartedAt: Date, now: Date = Date()) throws -> UUID {
+        if let capture = active {
+            if capture.manifest.device.deviceId == metadata.deviceId &&
+                capture.manifest.device.internalRRExerciseId == metadata.internalRRExerciseId {
+                try appendEvent(kind: "gap_ended", detail: "Matching episode resumed.", at: now)
+                return capture.manifest.captureId
+            }
+            try appendEvent(kind: "episode_identity_changed", detail: "Retaining previous segment; a different RR episode is starting.", at: now)
+            _ = try finish(state: .interrupted, batteryPercentAtEnd: nil, endedAt: now)
+        }
+        let summary = try begin(metadata: metadata, channels: channels, startedAt: now)
+        active?.manifest.episodeStartedAt = episodeStartedAt
+        if let capture = active { try writeManifest(capture.manifest, to: capture.manifestURL) }
+        return summary.captureId
+    }
+
+    private func validateCapture(_ captureId: UUID?) throws {
+        if let captureId, active?.manifest.captureId != captureId { throw StoreError.staleCapture }
+    }
+
+    func appendECG(_ samples: [ResearchECGSample], captureId: UUID? = nil) throws {
+        try validateCapture(captureId)
         guard !samples.isEmpty else { return }
         var data = Data(capacity: samples.count * 12)
         for sample in samples {
@@ -301,7 +326,8 @@ actor ResearchCaptureStore {
         try appendBinary(channel: "ecg", recordEncoding: "little_endian:uint64_timestamp_ns,int32_microvolts", data: data, recordCount: UInt64(samples.count))
     }
 
-    func appendACC(_ samples: [ResearchACCSample]) throws {
+    func appendACC(_ samples: [ResearchACCSample], captureId: UUID? = nil) throws {
+        try validateCapture(captureId)
         guard !samples.isEmpty else { return }
         var data = Data(capacity: samples.count * 20)
         for sample in samples {
@@ -313,7 +339,8 @@ actor ResearchCaptureStore {
         try appendBinary(channel: "acc", recordEncoding: "little_endian:uint64_timestamp_ns,int32_x_mg,int32_y_mg,int32_z_mg", data: data, recordCount: UInt64(samples.count))
     }
 
-    func appendHR(_ samples: [ResearchHRSample]) throws {
+    func appendHR(_ samples: [ResearchHRSample], captureId: UUID? = nil) throws {
+        try validateCapture(captureId)
         guard !samples.isEmpty else { return }
         for sample in samples {
             try appendLine(try lineEncoder.encode(sample), toActiveNamedFile: "hr.ndjson", channel: "hr", recordEncoding: "ndjson:ResearchHRSample")
@@ -326,7 +353,8 @@ actor ResearchCaptureStore {
         try appendLine(try lineEncoder.encode(event), to: active.eventsURL)
     }
 
-    func appendTimeAnchor(channel: String, deviceTimestampNs: UInt64, hostReceivedAt: Date = Date()) throws {
+    func appendTimeAnchor(channel: String, deviceTimestampNs: UInt64, hostReceivedAt: Date = Date(), captureId: UUID? = nil) throws {
+        try validateCapture(captureId)
         let anchor = ResearchTimeAnchor(
             channel: channel,
             deviceTimestampNs: deviceTimestampNs,

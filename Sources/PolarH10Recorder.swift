@@ -552,6 +552,9 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                 return
             }
 
+            // Stop stale recovery tasks and close any old raw segment before
+            // creating a new physiological identity.
+            await stopResearchCapture(reason: "new_episode")
             let exerciseId = "AOS_\(Int(Date().timeIntervalSince1970))"
             let startedAt = Date()
 
@@ -1053,7 +1056,8 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                 return
             }
 
-            if await researchStore.activeCaptureId() == nil {
+            guard rawCaptureExpected, recordingOngoing, currentExerciseId == exerciseId else { return }
+            do {
                 let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
                 let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? ""
                 let metadata = ResearchDeviceMetadata(
@@ -1066,19 +1070,14 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                     internalRRExerciseId: exerciseId,
                     batteryPercentAtStart: batteryPercent
                 )
-                _ = try await researchStore.begin(
+                let captureId = try await researchStore.ensureEpisodeCapture(
                     metadata: metadata,
                     channels: descriptors,
-                    startedAt: startedAt
+                    episodeStartedAt: startedAt
                 )
-            } else {
-                try? await researchStore.appendEvent(
-                    kind: "gap_ended",
-                    detail: "Bluetooth/PMD connection restored; raw streams restarting."
-                )
+                guard rawCaptureExpected, recordingOngoing, currentExerciseId == exerciseId else { return }
+                startStreamTasks(ecgSetting: ecgSetting, accSetting: accSetting, captureId: captureId)
             }
-
-            startStreamTasks(ecgSetting: ecgSetting, accSetting: accSetting)
             await refreshRawCaptureSize()
         } catch {
             rawStreamActive = false
@@ -1092,7 +1091,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
 
     private func resumeResearchStreamsAfterReconnect() async {
         guard rawCaptureExpected, recordingOngoing, !rawStreamActive, !streamAttemptActive,
-              !researchStartInProgress,
+              !researchStartInProgress, !nightActionInProgress, !fetchInProgress,
               let exerciseId = currentExerciseId else { return }
         let startedAt = UserDefaults.standard.object(forKey: Keys.startedAt) as? Date ?? Date()
         await startResearchCapture(exerciseId: exerciseId, startedAt: startedAt)
@@ -1117,6 +1116,12 @@ final class PolarH10Recorder: NSObject, ObservableObject {
             let status = try await requestStatusWithTimeout()
             recordingOngoing = status.ongoing
             if status.ongoing {
+                guard status.entryId == currentExerciseId else {
+                    rawCaptureExpected = false
+                    UserDefaults.standard.set(false, forKey: Keys.rawCaptureExpected)
+                    rawStreamStatus = "RR identity needs review; old raw segment retained"
+                    return
+                }
                 if !status.entryId.isEmpty {
                     currentExerciseId = status.entryId
                     UserDefaults.standard.set(status.entryId, forKey: Keys.exerciseId)
@@ -1133,7 +1138,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         }
     }
 
-    private func startStreamTasks(ecgSetting: PolarSensorSetting?, accSetting: PolarSensorSetting?) {
+    private func startStreamTasks(ecgSetting: PolarSensorSetting?, accSetting: PolarSensorSetting?, captureId: UUID) {
         streamWatchdogTask?.cancel()
         ecgStreamTask?.cancel()
         accStreamTask?.cancel()
@@ -1171,14 +1176,15 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                         let samples = batch.map {
                             ResearchECGSample(deviceTimestampNs: $0.timeStamp, voltageMicrovolts: $0.voltage)
                         }
-                        try await self.researchStore.appendECG(samples)
+                        try await self.researchStore.appendECG(samples, captureId: captureId)
                         self.notePacket(channel: "ecg", receivedAt: receivedAt)
                         if let first = samples.first,
                            self.lastECGAnchorAt.map({ receivedAt.timeIntervalSince($0) >= 60 }) ?? true {
                             try await self.researchStore.appendTimeAnchor(
                                 channel: "ecg",
                                 deviceTimestampNs: first.deviceTimestampNs,
-                                hostReceivedAt: receivedAt
+                                hostReceivedAt: receivedAt,
+                                captureId: captureId
                             )
                             self.lastECGAnchorAt = receivedAt
                         }
@@ -1213,14 +1219,15 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                                 zMilliG: $0.z
                             )
                         }
-                        try await self.researchStore.appendACC(samples)
+                        try await self.researchStore.appendACC(samples, captureId: captureId)
                         self.notePacket(channel: "acc", receivedAt: receivedAt)
                         if let first = samples.first,
                            self.lastACCAnchorAt.map({ receivedAt.timeIntervalSince($0) >= 60 }) ?? true {
                             try await self.researchStore.appendTimeAnchor(
                                 channel: "acc",
                                 deviceTimestampNs: first.deviceTimestampNs,
-                                hostReceivedAt: receivedAt
+                                hostReceivedAt: receivedAt,
+                                captureId: captureId
                             )
                             self.lastACCAnchorAt = receivedAt
                         }
@@ -1257,7 +1264,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                                 contactStatusSupported: $0.contactStatusSupported
                             )
                         }
-                        try await self.researchStore.appendHR(samples)
+                        try await self.researchStore.appendHR(samples, captureId: captureId)
                         self.notePacket(channel: "hr", receivedAt: receivedAt)
                         await self.refreshRawCaptureSize()
                     }
@@ -1739,6 +1746,9 @@ extension PolarH10Recorder: PolarBleApiDeviceFeaturesObserver {
                self.recordingOngoing,
                self.connectionState == .connected,
                self.onlineStreamingFeatureReady,
+               !self.nightActionInProgress,
+               !self.fetchInProgress,
+               !self.pftpOperationInProgress,
                !self.rawStreamActive {
                 Task { await self.resumeResearchStreamsAfterReconnect() }
             }

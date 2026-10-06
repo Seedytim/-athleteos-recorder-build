@@ -39,10 +39,51 @@ struct RecorderRegression {
         precondition(!FileManager.default.fileExists(atPath: url.path), "Verified local cleanup must remove only the selected file")
         try await testCleanupJournal(raw: raw, sha: sha, id: id)
         try await testResearchCaptureStore()
+        try await testEpisodeCaptureIsolation()
         #if canImport(Combine) && canImport(Security) && canImport(CryptoKit)
         try await testUploaderTransport(raw: raw)
         #endif
         print("PASS: verified archive receipts only, SHA must match, raw samples preserved, queue files discoverable and independently deletable")
+    }
+
+    static func testEpisodeCaptureIsolation() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ResearchCaptureStore(root: root)
+        func metadata(_ exercise: String, device: String = "H10") -> ResearchDeviceMetadata {
+            ResearchDeviceMetadata(deviceId: device, model: "Polar H10", firmwareVersion: nil,
+                polarSdkVersion: "test", appVersion: "2.1.3", appBuild: "20",
+                internalRRExerciseId: exercise, batteryPercentAtStart: 100)
+        }
+        let origin = Date(timeIntervalSince1970: 1000)
+        let first = try await store.ensureEpisodeCapture(metadata: metadata("old"), channels: [],
+            episodeStartedAt: origin, now: origin.addingTimeInterval(10))
+        let resumed = try await store.ensureEpisodeCapture(metadata: metadata("old"), channels: [],
+            episodeStartedAt: origin, now: origin.addingTimeInterval(20))
+        precondition(first == resumed, "Reconnect must retain matching episode identity")
+        let secondStart = origin.addingTimeInterval(100)
+        let second = try await store.ensureEpisodeCapture(metadata: metadata("new"), channels: [],
+            episodeStartedAt: secondStart, now: secondStart.addingTimeInterval(5))
+        precondition(second != first, "New exercise must create a separate capture")
+        do {
+            try await store.appendECG([ResearchECGSample(deviceTimestampNs: 1, voltageMicrovolts: 42)], captureId: first)
+            preconditionFailure("Old stream must not write into new capture")
+        } catch ResearchCaptureStore.StoreError.staleCapture {}
+        try await store.appendECG([ResearchECGSample(deviceTimestampNs: 2, voltageMicrovolts: 43)], captureId: second)
+        _ = try await store.finish(batteryPercentAtEnd: 99, endedAt: secondStart.addingTimeInterval(15))
+        let archives = try await store.pendingArchives()
+        precondition(archives.count == 2, "Previous raw data must be preserved")
+        let latest = archives.first { $0.captureId == second }!
+        precondition(latest.manifest.device.internalRRExerciseId == "new")
+        precondition(latest.manifest.startedAt == secondStart.addingTimeInterval(5))
+        precondition(latest.manifest.episodeStartedAt == secondStart)
+        precondition(latest.manifest.files.first { $0.channel == "ecg" }?.recordCount == 1)
+        let third = try await store.ensureEpisodeCapture(metadata: metadata("new"), channels: [],
+            episodeStartedAt: secondStart, now: secondStart.addingTimeInterval(30))
+        let otherDevice = try await store.ensureEpisodeCapture(metadata: metadata("new", device: "OTHER"), channels: [],
+            episodeStartedAt: secondStart, now: secondStart.addingTimeInterval(40))
+        precondition(third != otherDevice, "Device identity must also match")
+        print("PASS: episode isolation, reconnect reuse, segment clock, retained raw data, stale packet rejection")
     }
 
     static func testStreamHealthPolicy() {
