@@ -57,8 +57,8 @@ jobs:
           VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Info.plist")
           BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP/Info.plist")
           echo "Built Recorder version=$VERSION build=$BUILD"
-          test "$VERSION" = "2.1.3"
-          test "$BUILD" = "20"
+          test "$VERSION" = "2.1.4"
+          test "$BUILD" = "21"
 
           # Preserve the existing Home Screen night recorder widget.
           WIDGET="$APP/PlugIns/RecorderWidget.appex"
@@ -174,7 +174,7 @@ jobs:
                       "version": version,
                       "buildVersion": build,
                       "date": date,
-                      "localizedDescription": "Fixes raw capture episode identity and segment start times, rejects stale stream packets, preserves previous captures, and includes packet-confirmed ECG/ACC recovery and coverage diagnostics. Keep Bluetooth enabled for ECG and movement.",
+                      "localizedDescription": "Faster and more reliable morning save: reads the H10 file directly first, reconnects only on actual transfer failure, uses PS-FTP-only readiness after stop, and keeps retries/timeouts bounded while preserving the sensor copy.",
                       "downloadURL": download,
                       "size": int(size),
                       "minOSVersion": "16.0",
