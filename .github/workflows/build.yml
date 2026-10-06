@@ -4,7 +4,7 @@ on:
     branches: [main]
     paths: ["Sources/**","Resources/**","Scripts/**","Tests/**","project.yml",".github/workflows/build.yml",".github/workflows/release.yml"]
   pull_request:
-    paths: ["Sources/**","Resources/**","Scripts/**","Tests/**","project.yml"]
+    paths: ["Sources/**","Resources/**","Scripts/**","Tests/**","project.yml",".github/workflows/build.yml"]
 concurrency:
   group: recorder-validate-${{ github.ref }}
   cancel-in-progress: true
@@ -35,3 +35,27 @@ jobs:
         run: xcodebuild -resolvePackageDependencies -clonedSourcePackagesDirPath .swift-packages -project AthleteOSRecorder.xcodeproj -scheme AthleteOSRecorder
       - name: Compile iPhone simulator
         run: xcodebuild -clonedSourcePackagesDirPath .swift-packages -project AthleteOSRecorder.xcodeproj -scheme AthleteOSRecorder -configuration Debug -sdk iphonesimulator -derivedDataPath build-simulator -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build
+      - name: Build unreleased unsigned iPhone candidate
+        if: github.event_name == 'pull_request'
+        run: xcodebuild -clonedSourcePackagesDirPath .swift-packages -project AthleteOSRecorder.xcodeproj -scheme AthleteOSRecorder -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build-candidate CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
+      - name: Validate and package candidate without publishing
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          APP="build-candidate/Build/Products/Release-iphoneos/AthleteOSRecorder.app"
+          test -d "$APP/PlugIns/RecorderWidget.appex"
+          test "$('/usr/libexec/PlistBuddy' -c 'Print :UIBackgroundModes:0' "$APP/Info.plist")" = "bluetooth-central"
+          mkdir -p candidate/Payload
+          cp -R "$APP" candidate/Payload/
+          cd candidate
+          zip -qry AthleteOSRecorder-phone-live-UNRELEASED.ipa Payload
+          shasum -a 256 AthleteOSRecorder-phone-live-UNRELEASED.ipa > SHA256.txt
+      - name: Retain candidate for testing only
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: phone-live-unreleased-${{ github.event.pull_request.head.sha }}
+          path: |
+            candidate/AthleteOSRecorder-phone-live-UNRELEASED.ipa
+            candidate/SHA256.txt
+          retention-days: 14
