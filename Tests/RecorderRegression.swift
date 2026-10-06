@@ -172,6 +172,15 @@ struct RecorderRegression {
                      "End night must attempt the stored RR read")
         precondition(!stopBody.contains("try await resetConnectionForStoredFetch()"),
                      "Normal End night must not force a reconnect before its first stored RR read")
+        let retryEnd = source.range(of: "private func enforceSingleBLEConnectionMode", range: retryStart.upperBound..<source.endIndex)
+            ?? source.endIndex..<source.endIndex
+        let retryBody = String(source[retryStart.lowerBound..<retryEnd.lowerBound])
+        guard let reconnectPos = retryBody.range(of: "try await resetConnectionForStoredFetch()")?.lowerBound,
+              let singleModePos = retryBody.range(of: "try await enforceSingleBLEConnectionMode(context: \"before retained RR recovery\")")?.lowerBound else {
+            preconditionFailure("Retained fetch must include reconnect and single-BLE verification")
+        }
+        precondition(reconnectPos < singleModePos,
+                     "Retained fetch must reconnect before querying H10 multi-BLE mode; otherwise Polar SDK error 2/3 is guaranteed while disconnected")
 
         guard let fetchStart = source.range(of: "private func fetchAndSaveStoredRecording"),
               let persistStart = source.range(of: "private func persistFetchedExercise", range: fetchStart.upperBound..<source.endIndex) else {
@@ -232,7 +241,7 @@ struct RecorderRegression {
         precondition(!resetBody.contains("connectionState == .connected && h10RecordingFeatureReady && fileTransferFeatureReady"),
                      "Stopped-file recovery must not require the exercise-recording service callback")
 
-        print("PASS: morning save + single-BLE safeguard + dual identifier lookup + hard SDK rebuild + verified PS-FTP recovery")
+        print("PASS: retained fetch reconnects before single-BLE verification + dual identifier lookup + hard SDK rebuild + verified PS-FTP recovery")
     }
 
     static func testCleanupJournal(raw: RawH10RRRecording, sha: String, id: String) async throws {
