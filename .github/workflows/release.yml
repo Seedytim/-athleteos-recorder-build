@@ -57,8 +57,8 @@ jobs:
           VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Info.plist")
           BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP/Info.plist")
           echo "Built Recorder version=$VERSION build=$BUILD"
-          test "$VERSION" = "2.1.4"
-          test "$BUILD" = "21"
+          test "$VERSION" = "2.1.5"
+          test "$BUILD" = "22"
 
           # Preserve the existing Home Screen night recorder widget.
           WIDGET="$APP/PlugIns/RecorderWidget.appex"
@@ -174,7 +174,7 @@ jobs:
                       "version": version,
                       "buildVersion": build,
                       "date": date,
-                      "localizedDescription": "Faster and more reliable morning save: reads the H10 file directly first, reconnects only on actual transfer failure, uses PS-FTP-only readiness after stop, and keeps retries/timeouts bounded while preserving the sensor copy.",
+                      "localizedDescription": "Fixes Polar SDK error 2/3 during morning save by using the connected CoreBluetooth peripheral UUID for stored-file reads and explicitly recovering a lost SDK/GATT session before retrying. The H10 sensor copy remains untouched until AthleteOS verifies upload.",
                       "downloadURL": download,
                       "size": int(size),
                       "minOSVersion": "16.0",
