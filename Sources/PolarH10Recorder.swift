@@ -1130,7 +1130,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                     for try await batch in self.api.startAccStreaming(self.deviceId, settings: accSetting) {
                         if Task.isCancelled { break }
                         let receivedAt = Date()
-                        let samples = batch.samples.map {
+                        let samples = batch.map {
                             ResearchACCSample(
                                 deviceTimestampNs: $0.timeStamp,
                                 xMilliG: $0.x,
