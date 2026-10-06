@@ -1708,6 +1708,9 @@ final class PolarH10Recorder: NSObject, ObservableObject {
 
     private func streamEnded(channel: String, error: Error?) async {
         if Task.isCancelled { return }
+        if phoneMode, let error {
+            fail("Live \(channel) capture interrupted: \(error.localizedDescription). Durable received chunks are retained.")
+        }
         // HR is an opportunistic QA channel. It must never tear down healthy
         // ECG/ACC streams if the standard Heart Rate Service ends by itself.
         if channel == "HR" && !phoneMode {

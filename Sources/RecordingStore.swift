@@ -161,7 +161,17 @@ actor RecordingStore {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
         let file = directory.appendingPathComponent("\(recording.id.uuidString).json")
-        let data = try encoder.encode(recording)
+        let data: Data
+        if recording.storageMode == "phone_live" {
+            // Per-notification metadata is repetitive; pretty printing can push
+            // a full night over the ingestion limit without adding information.
+            let compact = JSONEncoder()
+            compact.outputFormatting = [.sortedKeys]
+            compact.dateEncodingStrategy = .iso8601
+            data = try compact.encode(recording)
+        } else {
+            data = try encoder.encode(recording)
+        }
         try durableWrite(data, to: file)
         return file
     }

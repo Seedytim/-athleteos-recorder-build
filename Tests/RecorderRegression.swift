@@ -82,6 +82,8 @@ struct RecorderRegression {
         precondition(archives.allSatisfy { $0.manifest.recordingMode == "phone_live" })
         precondition(archives.flatMap(\.manifest.files).filter { $0.channel == "hr" }.count >= 4, "HR chunks must stay below upload size limits")
         let file = try await rrStore.save(raw)
+        let compactBytes = try Data(contentsOf: file)
+        precondition(!compactBytes.contains(0x0A), "Full-night phone JSON must not waste upload capacity on pretty printing")
         let receipt = VerifiedArchiveReceipt(recordingID: UUID().uuidString, sha256: String(repeating: "a", count: 64), processingState: "complete")
         _ = try await rrStore.confirmArchive(file, receipt: receipt)
         let sensorJobs = try await rrStore.readySensorCleanups()
