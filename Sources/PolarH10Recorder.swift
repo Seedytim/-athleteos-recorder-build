@@ -100,6 +100,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                 .feature_hr,
                 .feature_polar_online_streaming,
                 .feature_polar_device_control,
+                .feature_polar_features_configuration_service,
                 .feature_polar_file_transfer,
                 .feature_polar_h10_exercise_recording
             ],
@@ -599,6 +600,9 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                 return
             }
 
+            statusText = "Preparing H10 single-connection mode…"
+            try await enforceSingleBLEConnectionMode(context: "before overnight recording")
+
             // Stop stale recovery tasks and close any old raw segment before
             // creating a new physiological identity.
             await stopResearchCapture(reason: "new_episode")
@@ -702,6 +706,9 @@ final class PolarH10Recorder: NSObject, ObservableObject {
 
             pendingFetchAvailable = true
 
+            statusText = "Preparing H10 single-connection mode for file transfer…"
+            try await enforceSingleBLEConnectionMode(context: "before stored RR fetch")
+
             // Fast path: use the connection that just stopped the exercise.
             // Reconnect only if Polar actually returns PFTP 106 or the read times out.
             statusText = "Recording stopped. Reading saved RR file…"
@@ -730,6 +737,12 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         let stoppedAt = (UserDefaults.standard.object(forKey: Keys.stoppedAt) as? Date) ?? Date()
 
         do {
+            // Polar documents PFTP 106 with affected H10 firmware when dual-BLE
+            // connection mode is enabled. Disable it before every retained-file
+            // recovery attempt, including recordings created by older builds.
+            statusText = "Preparing H10 single-connection mode for retained file…"
+            try await enforceSingleBLEConnectionMode(context: "before retained RR recovery")
+
             // Once an exercise is stopped, PS-FTP is the only service required.
             // If it is already ready, do not reset a healthy BLE connection.
             if !StoredFetchConnectionPolicy.ready(
@@ -745,6 +758,48 @@ final class PolarH10Recorder: NSObject, ObservableObject {
             pendingFetchAvailable = true
             fail("Reconnect for fetch failed: \(friendlyError(error)). Sensor copy retained; tap End night to retry.")
         }
+    }
+
+    private func enforceSingleBLEConnectionMode(context: String) async throws {
+        var lastError: Error?
+
+        for identifier in storedFetchIdentifiers {
+            do {
+                let sensorAPI = api
+                let enabled = try await sensorAPI.getMultiBLEConnectionMode(identifier: identifier)
+
+                if enabled {
+                    statusText = "Disabling H10 dual-Bluetooth mode (context)…"
+                    try await sensorAPI.setMultiBLEConnectionMode(identifier: identifier, enable: false)
+                }
+
+                let verified = try await sensorAPI.getMultiBLEConnectionMode(identifier: identifier)
+                guard verified == false else {
+                    throw NSError(
+                        domain: "AthleteOSRecorder",
+                        code: 1015,
+                        userInfo: [NSLocalizedDescriptionKey: "H10 dual-Bluetooth mode could not be disabled."]
+                    )
+                }
+
+                statusText = "H10 single-connection mode confirmed."
+                // Give the firmware time to drop any second BLE peer and commit the
+                // setting before PFTP start/fetch operations.
+                try await Task.sleep(for: .seconds(2))
+                return
+            } catch {
+                lastError = error
+                // Try the alternate stable identifier before giving up. Polar's SDK
+                // session table can resolve either deviceId or CoreBluetooth UUID.
+                continue
+            }
+        }
+
+        throw lastError ?? NSError(
+            domain: "AthleteOSRecorder",
+            code: 1016,
+            userInfo: [NSLocalizedDescriptionKey: "Could not verify H10 single-connection mode."]
+        )
     }
 
     private func resetConnectionForStoredFetch() async throws {
@@ -892,9 +947,10 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                             let delay = retryDelays[min(attempt - 1, retryDelays.count - 1)]
                             statusText = isPftpTimeout(error)
                                 ? "H10 RR read timed out. Resetting connection in \(delay)s…"
-                                : "H10 refused the direct RR read (Polar 106). Resetting connection in \(delay)s…"
+                                : "Polar 106. Reconnecting in single-Bluetooth mode in \(delay)s…"
                             try await Task.sleep(for: .seconds(delay))
                             try await resetConnectionForStoredFetch()
+                            try await enforceSingleBLEConnectionMode(context: "after PFTP retry")
                             continue
                         }
 
@@ -1862,6 +1918,10 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         }
         if isPolarSessionUnavailable(error) {
             return "Polar lost the H10 Bluetooth session (SDK error 2/3)"
+        }
+        let nsError = error as NSError
+        if nsError.domain == "AthleteOSRecorder" && [1015, 1016].contains(nsError.code) {
+            return nsError.localizedDescription
         }
         return error.localizedDescription
     }
