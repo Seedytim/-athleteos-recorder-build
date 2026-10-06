@@ -6,6 +6,7 @@ import PolarBleSdk
 final class PolarH10Recorder: NSObject, ObservableObject {
     struct NearbyH10: Identifiable, Hashable {
         let id: String
+        let address: UUID
         let name: String
         let rssi: Int
     }
@@ -74,6 +75,12 @@ final class PolarH10Recorder: NSObject, ObservableObject {
     private var preparationTask: Task<Void, Never>?
     private var fetchReconnectInProgress = false
     private var didAutoRefreshCurrentConnection = false
+    private var sdkSessionIdentifier: String
+
+    private var preferredSdkIdentifier: String {
+        let value = sdkSessionIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? deviceId : value
+    }
 
     private lazy var api: PolarBleApi = {
         PolarBleApiDefaultImpl.polarImplementation(
@@ -100,6 +107,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         static let uploadedExerciseId = "h10.uploadedExerciseId"
         static let pendingSensorCleanupIds = "h10.pendingSensorCleanupIds"
         static let rawCaptureExpected = "h10.rawCaptureExpected"
+        static let sdkSessionIdentifier = "h10.sdkSessionIdentifier"
     }
 
     override init() {
@@ -107,6 +115,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         let savedFilePath = UserDefaults.standard.string(forKey: Keys.lastSavedFilePath)
         let uploadedExerciseId = UserDefaults.standard.string(forKey: Keys.uploadedExerciseId)
         self.deviceId = UserDefaults.standard.string(forKey: Keys.deviceId) ?? ""
+        self.sdkSessionIdentifier = UserDefaults.standard.string(forKey: Keys.sdkSessionIdentifier) ?? ""
         self.currentExerciseId = savedExerciseId
         self.pendingFetchAvailable = savedExerciseId != nil
         if let savedFilePath, FileManager.default.fileExists(atPath: savedFilePath) {
@@ -373,7 +382,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                     let name = device.name.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard name.uppercased().contains("H10"), device.connectable else { continue }
 
-                    let found = NearbyH10(id: device.deviceId, name: name, rssi: device.rssi)
+                    let found = NearbyH10(id: device.deviceId, address: device.address, name: name, rssi: device.rssi)
                     if let index = self.nearbyH10s.firstIndex(where: { $0.id == found.id }) {
                         let previous = self.nearbyH10s[index]
                         guard previous.name != found.name || abs(previous.rssi - found.rssi) >= 5 else { continue }
@@ -414,6 +423,8 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         }
         stopScanning()
         deviceId = h10.id
+        sdkSessionIdentifier = h10.address.uuidString
+        UserDefaults.standard.set(sdkSessionIdentifier, forKey: Keys.sdkSessionIdentifier)
         connect()
     }
 
@@ -421,7 +432,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         preparationTask?.cancel()
         preparationTimedOut = false
         clearError()
-        let trimmed = deviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = preferredSdkIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             fail("Scan for your Polar H10 first.")
             return
@@ -454,7 +465,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                 await stopResearchCapture(reason: "manual_disconnect")
             }
             do {
-                try api.disconnectFromDevice(deviceId)
+                try api.disconnectFromDevice(preferredSdkIdentifier)
                 statusText = recordingOngoing
                     ? "Phone disconnected. H10 internal RR continues safely."
                     : "Disconnected."
@@ -757,7 +768,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         statusText = "Reconnecting H10 for stored-file transfer…"
 
         do {
-            try api.connectToDevice(deviceId)
+            try api.connectToDevice(preferredSdkIdentifier)
         } catch {
             connectionState = .disconnected
             throw error
@@ -771,7 +782,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                 // A stored-file read needs PS-FTP only. Waiting for the exercise
                 // recording-service callback here created false morning failures.
                 statusText = "H10 file transfer ready. Settling connection…"
-                try await Task.sleep(for: .milliseconds(400))
+                try await Task.sleep(for: .seconds(2))
                 statusText = "H10 reconnected. Reading stored RR recording…"
                 return
             }
@@ -818,6 +829,12 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                         try await persistFetchedExercise(exercise, entry: directEntry, stoppedAt: stoppedAt)
                         return
                     } catch {
+                        if isPolarSessionUnavailable(error), attempt < maxAttempts {
+                            statusText = "Polar lost the H10 session. Restoring it before retry…"
+                            try await recoverMissingSdkSessionForStoredFetch()
+                            continue
+                        }
+
                         if (isOperationNotPermitted106(error) || isPftpTimeout(error)), attempt < maxAttempts {
                             let delay = retryDelays[min(attempt - 1, retryDelays.count - 1)]
                             statusText = isPftpTimeout(error)
@@ -855,6 +872,18 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                 try await persistFetchedExercise(exercise, entry: entry, stoppedAt: stoppedAt)
                 return
             } catch {
+                if isPolarSessionUnavailable(error), attempt < maxAttempts {
+                    statusText = "Polar lost the H10 session. Restoring it before retry…"
+                    do {
+                        try await recoverMissingSdkSessionForStoredFetch()
+                    } catch {
+                        pendingFetchAvailable = true
+                        fail("H10 session recovery failed: \(friendlyError(error)). Sensor copy retained; tap End night to retry.")
+                        return
+                    }
+                    continue
+                }
+
                 // A failed reconnect is already a definitive transport failure for
                 // this attempt. Do not immediately spend another ~15 seconds doing
                 // the same reset again; the sensor copy remains safe.
@@ -913,21 +942,22 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         UserDefaults.standard.removeObject(forKey: Keys.uploadedExerciseId)
         pendingFetchAvailable = false
         clearError()
-        statusText = "Saved \(exercise.samples.count) raw RR samples. Sensor copy retained; tap End night to retry."
+        statusText = "Saved \(exercise.samples.count) raw RR samples to your phone. Sensor copy retained until AthleteOS verifies upload."
     }
 
     private func listExercisesWithTimeout(seconds: UInt64) async throws -> [PolarExerciseEntry] {
-        try await withThrowingTaskGroup(of: [PolarExerciseEntry].self) { group in
-            group.addTask { [api, deviceId] in
+        let sensorId = preferredSdkIdentifier
+        return try await withThrowingTaskGroup(of: [PolarExerciseEntry].self) { group in
+            group.addTask { [api, sensorId] in
                 var entries: [PolarExerciseEntry] = []
-                for try await entry in api.listExercises(deviceId) {
+                for try await entry in api.listExercises(sensorId) {
                     entries.append(entry)
                 }
                 return entries
             }
-            group.addTask { [api, deviceId] in
+            group.addTask { [api, sensorId] in
                 try await Task.sleep(for: .seconds(seconds))
-                try? api.disconnectFromDevice(deviceId)
+                try? api.disconnectFromDevice(sensorId)
                 throw NSError(
                     domain: "AthleteOSRecorder",
                     code: 1004,
@@ -950,13 +980,14 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         _ entry: PolarExerciseEntry,
         seconds: UInt64
     ) async throws -> PolarExerciseData {
-        try await withThrowingTaskGroup(of: PolarExerciseData.self) { group in
-            group.addTask { [api, deviceId] in
-                try await api.fetchExercise(deviceId, entry: entry)
+        let sensorId = preferredSdkIdentifier
+        return try await withThrowingTaskGroup(of: PolarExerciseData.self) { group in
+            group.addTask { [api, sensorId] in
+                try await api.fetchExercise(sensorId, entry: entry)
             }
-            group.addTask { [api, deviceId] in
+            group.addTask { [api, sensorId] in
                 try await Task.sleep(for: .seconds(seconds))
-                try? api.disconnectFromDevice(deviceId)
+                try? api.disconnectFromDevice(sensorId)
                 throw NSError(
                     domain: "AthleteOSRecorder",
                     code: 1006,
@@ -1686,9 +1717,62 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         return nsError.domain == "AthleteOSRecorder" && [1001, 1002].contains(nsError.code)
     }
 
+
+    private func isPolarSessionUnavailable(_ error: Error) -> Bool {
+        if let polar = error as? PolarErrors {
+            switch polar {
+            case .deviceNotConnected, .deviceNotFound:
+                return true
+            default:
+                break
+            }
+        }
+        let nsError = error as NSError
+        return nsError.domain.contains("PolarErrors") && [2, 3].contains(nsError.code)
+    }
+
+    private func recoverMissingSdkSessionForStoredFetch() async throws {
+        // Polar error 2/3 means the SDK cannot resolve an open GATT session even
+        // if our last observer callback still says Connected. Treat the local state
+        // as stale, reconnect, then wait beyond feature-ready for the SDK session map
+        // and encrypted GATT link to settle.
+        preparationTask?.cancel()
+        try? api.disconnectFromDevice(preferredSdkIdentifier)
+        connectionState = .disconnected
+        h10RecordingFeatureReady = false
+        fileTransferFeatureReady = false
+        onlineStreamingFeatureReady = false
+        hrFeatureReady = false
+
+        statusText = "Polar lost the H10 session. Reconnecting cleanly…"
+        try api.connectToDevice(preferredSdkIdentifier)
+        connectionState = .connecting
+
+        for _ in 0..<200 {
+            if StoredFetchConnectionPolicy.ready(
+                connected: connectionState == .connected,
+                transferReady: fileTransferFeatureReady
+            ) {
+                statusText = "H10 session restored. Settling file transfer…"
+                try await Task.sleep(for: .seconds(2))
+                return
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+
+        throw NSError(
+            domain: "AthleteOSRecorder",
+            code: 1011,
+            userInfo: [NSLocalizedDescriptionKey: "Polar SDK could not restore the H10 file-transfer session."]
+        )
+    }
+
     private func friendlyError(_ error: Error) -> String {
         if isOperationNotPermitted106(error) {
             return "Polar PFTP 106 (operation not permitted)"
+        }
+        if isPolarSessionUnavailable(error) {
+            return "Polar lost the H10 Bluetooth session (SDK error 2/3)"
         }
         return error.localizedDescription
     }
@@ -1721,6 +1805,8 @@ extension PolarH10Recorder: PolarBleApiObserver {
         Task { @MainActor in
             self.stopScanning()
             self.deviceId = identifier.deviceId
+            self.sdkSessionIdentifier = identifier.address.uuidString
+            UserDefaults.standard.set(self.sdkSessionIdentifier, forKey: Keys.sdkSessionIdentifier)
             self.connectionState = .connected
             self.statusText = self.preparationMessage
             self.watchPreparation()
