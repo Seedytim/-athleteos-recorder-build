@@ -13,7 +13,6 @@ struct ContentView: View {
     @EnvironmentObject private var notifications: RecorderNotifications
     @State private var actionGate = NightActionGate()
     @State private var nightActionWasEnd = false
-    @State private var pendingWidgetAction = false
     @State private var showSettings = false
     @State private var showRecordings = false
     @State private var savedFiles: [SavedRecordingFile] = []
@@ -118,20 +117,13 @@ struct ContentView: View {
             .sheet(isPresented: $showSettings) { settings }
             .sheet(isPresented: $showRecordings, onDismiss: { Task { await refreshSavedFiles() } }) { recordings }
             .onOpenURL { url in
-                if RecorderCompanionPolicy.isNightAction(url) {
-                    guard !actionGate.running else { return }
-                    pendingWidgetAction = true
-                    consumeWidgetAction()
-                } else {
-                    Task { _ = await uploader.handleConnectionURL(url) }
-                }
+                Task { _ = await uploader.handleConnectionURL(url) }
             }
             .onChange(of: recorder.pendingFetchAvailable) { _ in syncReminders() }
             .onChange(of: recorder.recordingOngoing) { _ in syncReminders() }
             .task {
                 syncReminders()
                 await notifications.refreshAuthorization()
-                consumeWidgetAction()
                 // Retry transient network/archive failures while this view is active.
                 while !Task.isCancelled {
                     if scenePhase == .active {
@@ -156,7 +148,6 @@ struct ContentView: View {
             }
             .onChange(of: scenePhase) { phase in
                 if phase == .active {
-                    consumeWidgetAction()
                     Task {
                         syncReminders()
                         await notifications.refreshAuthorization()
@@ -285,12 +276,6 @@ struct ContentView: View {
             startedAt: UserDefaults.standard.object(forKey: "h10.startedAt") as? Date)
     }
 
-    private func consumeWidgetAction() {
-        guard pendingWidgetAction, scenePhase == .active else { return }
-        pendingWidgetAction = false
-        primaryAction()
-    }
-
     private func primaryAction() {
         guard actionGate.begin() else { return }
         nightActionWasEnd = recorder.recordingOngoing || recorder.pendingFetchAvailable
@@ -411,10 +396,6 @@ struct ContentView: View {
                     Text("Morning reminders are scheduled only for a night awaiting collection. Alerts confirm recording and verified archival, or tell you when attention is needed. Reminder times follow your iPhone's local time.")
                         .font(.footnote).foregroundStyle(.secondary)
                     if let error = notifications.error { Text(error).font(.footnote).foregroundStyle(.orange) }
-                }
-                Section("Home Screen widget") {
-                    Text("Add AthleteOS Recorder → Night recorder from your Home Screen's widget gallery. One tap opens Recorder and runs Start night or End night using the saved night state.")
-                    Text("Keep the widget extension when installing through SideStore.").font(.footnote).foregroundStyle(.secondary)
                 }
                 Section("Sensor storage") {
                     if recorder.pendingFetchAvailable {
