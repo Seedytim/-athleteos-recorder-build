@@ -153,12 +153,10 @@ struct RecorderRegression {
             ResearchHRSample(
                 receivedAt: Date(timeIntervalSince1970: 101),
                 bpm: 52,
-                correctedBpm: 0,
                 rrMs: [1148],
                 rrAvailable: true,
                 contactStatus: true,
-                contactStatusSupported: true,
-                ppgQuality: 0
+                contactStatusSupported: true
             )
         ])
         try await store.appendEvent(kind: "gap_started", detail: "Bluetooth disconnected during diagnostic test.")
