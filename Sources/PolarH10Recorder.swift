@@ -1004,6 +1004,41 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         await startResearchCapture(exerciseId: exerciseId, startedAt: startedAt)
     }
 
+    private func recoverResearchAfterFeatureReadyIfNeeded() async {
+        guard rawCaptureExpected,
+              pendingFetchAvailable,
+              !recordingOngoing,
+              !didAutoRefreshCurrentConnection,
+              !nightActionInProgress,
+              !fetchInProgress,
+              !pftpOperationInProgress,
+              h10RecordingFeatureReady,
+              fileTransferFeatureReady else { return }
+
+        didAutoRefreshCurrentConnection = true
+        pftpOperationInProgress = true
+        defer { pftpOperationInProgress = false }
+
+        do {
+            let status = try await requestStatusWithTimeout()
+            recordingOngoing = status.ongoing
+            if status.ongoing {
+                if !status.entryId.isEmpty {
+                    currentExerciseId = status.entryId
+                    UserDefaults.standard.set(status.entryId, forKey: Keys.exerciseId)
+                }
+                await resumeResearchStreamsAfterReconnect()
+            } else {
+                rawCaptureExpected = false
+                UserDefaults.standard.set(false, forKey: Keys.rawCaptureExpected)
+                rawStreamStatus = "Previous high-resolution capture ended unexpectedly; raw chunks retained"
+            }
+        } catch {
+            didAutoRefreshCurrentConnection = false
+            rawStreamStatus = "RR safety state retained; high-resolution recovery will retry"
+        }
+    }
+
     private func startStreamTasks(ecgSetting: PolarSensorSetting?, accSetting: PolarSensorSetting?) {
         ecgStreamTask?.cancel()
         accStreamTask?.cancel()
@@ -1021,7 +1056,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                     for try await batch in self.api.startEcgStreaming(self.deviceId, settings: ecgSetting) {
                         if Task.isCancelled { break }
                         let receivedAt = Date()
-                        let samples = batch.map {
+                        let samples = batch.samples.map {
                             ResearchECGSample(deviceTimestampNs: $0.timeStamp, voltageMicrovolts: $0.voltage)
                         }
                         try await self.researchStore.appendECG(samples)
@@ -1048,7 +1083,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                     for try await batch in self.api.startAccStreaming(self.deviceId, settings: accSetting) {
                         if Task.isCancelled { break }
                         let receivedAt = Date()
-                        let samples = batch.map {
+                        let samples = batch.samples.map {
                             ResearchACCSample(
                                 deviceTimestampNs: $0.timeStamp,
                                 xMilliG: $0.x,
@@ -1084,12 +1119,10 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                             ResearchHRSample(
                                 receivedAt: receivedAt,
                                 bpm: $0.hr,
-                                correctedBpm: $0.correctedHr,
                                 rrMs: $0.rrsMs,
                                 rrAvailable: $0.rrAvailable,
                                 contactStatus: $0.contactStatus,
-                                contactStatusSupported: $0.contactStatusSupported,
-                                ppgQuality: $0.ppgQuality
+                                contactStatusSupported: $0.contactStatusSupported
                             )
                         }
                         try await self.researchStore.appendHR(samples)
@@ -1430,6 +1463,12 @@ extension PolarH10Recorder: PolarBleApiDeviceFeaturesObserver {
                 self.fileTransferFeatureReady
             else {
                 return
+            }
+
+            if self.rawCaptureExpected,
+               self.pendingFetchAvailable,
+               !self.recordingOngoing {
+                Task { await self.recoverResearchAfterFeatureReadyIfNeeded() }
             }
 
             self.preparationTask?.cancel()
