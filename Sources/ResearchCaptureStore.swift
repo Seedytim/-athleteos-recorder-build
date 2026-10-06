@@ -415,12 +415,11 @@ actor ResearchCaptureStore {
             referenceSample: firstDeviceTimestampNs == nil ? "legacy_unspecified" : "last_sample_in_packet_receipt_estimate",
             packetSampleCount: packetSampleCount
         )
-        try appendLine(
-            try lineEncoder.encode(anchor),
-            toActiveNamedFile: "time-anchors.ndjson",
-            channel: "timebase",
-            recordEncoding: "ndjson:ResearchTimeAnchor"
-        )
+        var line = try lineEncoder.encode(anchor)
+        line.append(0x0A)
+        // Per-packet anchors must not fsync/rewrite the manifest every packet.
+        // Use the same bounded, rotating durable writer as raw samples.
+        try appendBinary(channel: "timebase", recordEncoding: "ndjson:ResearchTimeAnchor", data: line, recordCount: 1)
     }
 
     func finish(

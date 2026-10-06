@@ -378,7 +378,7 @@ struct RecorderRegression {
             hostReceivedAt: Date(timeIntervalSince1970: 100.125), captureId: summary.captureId,
             firstDeviceTimestampNs: preciseNs - 40_000_000, hostUptimeSeconds: 20.125,
             streamSegmentId: streamId, packetSampleCount: 6)
-        let anchorData = try Data(contentsOf: summary.directory.appendingPathComponent("time-anchors.ndjson"))
+        let anchorData = try Data(contentsOf: summary.directory.appendingPathComponent("timebase-0000.bin"))
         let anchorDecoder = JSONDecoder()
         anchorDecoder.dateDecodingStrategy = .iso8601
         let anchor = try anchorDecoder.decode(ResearchTimeAnchor.self, from: anchorData)
