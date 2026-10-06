@@ -1,6 +1,7 @@
 import Foundation
 import CoreBluetooth
 import PolarBleSdk
+import UIKit
 
 @MainActor
 final class RawH10Capture: NSObject, ObservableObject {
@@ -47,6 +48,7 @@ final class RawH10Capture: NSObject, ObservableObject {
     private var reconnectTask: Task<Void, Never>?
     private var reconnectGeneration: UInt64 = 0
     private var stopping = false
+    private var startWhenReady = false
 
     private lazy var api: PolarBleApi = {
         let api = PolarBleApiDefaultImpl.polarImplementation(
@@ -123,13 +125,16 @@ final class RawH10Capture: NSObject, ObservableObject {
             return
         }
         if connectionState == .disconnected {
+            startWhenReady = true
             connect()
             return
         }
         guard readyToStart else {
-            statusText = "Waiting for the H10 raw-data services…"
+            startWhenReady = true
+            statusText = "Preparing raw-data streams…"
             return
         }
+        startWhenReady = false
         Task { await startCapture() }
     }
 
@@ -186,6 +191,7 @@ final class RawH10Capture: NSObject, ObservableObject {
         deviceId = h10.id
         deviceName = h10.name
         UserDefaults.standard.set(deviceId, forKey: Keys.deviceId)
+        startWhenReady = true
         connect()
     }
 
@@ -604,6 +610,9 @@ extension RawH10Capture: PolarBleApiDeviceFeaturesObserver {
             if self.readyToStart {
                 if self.captureRequested {
                     await self.resumeCaptureIfNeeded()
+                } else if self.startWhenReady {
+                    self.startWhenReady = false
+                    await self.startCapture()
                 } else {
                     self.statusText = "Ready to record raw H10 data."
                 }
