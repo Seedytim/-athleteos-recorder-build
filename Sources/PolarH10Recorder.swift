@@ -1194,6 +1194,19 @@ final class PolarH10Recorder: NSObject, ObservableObject {
 
     private func streamEnded(channel: String, error: Error) async {
         if Task.isCancelled { return }
+        // HR is an opportunistic QA channel. It must never tear down healthy
+        // ECG/ACC streams if the standard Heart Rate Service ends by itself.
+        if channel == "HR" {
+            hrStreamRunning = false
+            hrStreamTask = nil
+            rawStreamActive = ecgStreamRunning || accStreamRunning
+            rawStreamStatus = rawStreamActive ? "ECG + ACC · HR unavailable" : "RR only · HR unavailable"
+            try? await researchStore.appendEvent(
+                kind: "optional_hr_stream_ended",
+                detail: error.localizedDescription
+            )
+            return
+        }
         await noteResearchGapAndReconnect(
             detail: "\(channel) stream ended: \(error.localizedDescription)"
         )
@@ -1251,8 +1264,16 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         hrStreamRunning = false
         rawStreamActive = false
         rawStreamStatus = "RR safe · reconnecting high-resolution stream"
-        try? await researchStore.appendEvent(kind: "gap_started", detail: detail)
+        // Install the recovery task before the first await so simultaneous ECG
+        // and ACC failures cannot create two competing reconnect loops.
         scheduleResearchReconnect()
+        try? await researchStore.appendEvent(kind: "gap_started", detail: detail)
+
+        if connectionState == .connected {
+            try? await api.stopStreaming(deviceId, type: .ecg)
+            try? await api.stopStreaming(deviceId, type: .acc)
+            try? await api.stopHrStreaming(deviceId)
+        }
     }
 
     private func scheduleResearchReconnect() {
@@ -1261,8 +1282,10 @@ final class PolarH10Recorder: NSObject, ObservableObject {
 
         researchReconnectTask = Task { [weak self] in
             guard let self else { return }
-            let delays: [UInt64] = [2, 5, 10, 20, 30]
-            for delay in delays {
+            let delays: [UInt64] = [2, 5, 10, 20, 30, 60]
+            var attempt = 0
+            while self.rawCaptureExpected && self.recordingOngoing {
+                let delay = delays[min(attempt, delays.count - 1)]
                 if Task.isCancelled || !self.rawCaptureExpected || !self.recordingOngoing { break }
                 do { try await Task.sleep(for: .seconds(delay)) } catch { break }
 
@@ -1271,6 +1294,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                         await self.resumeResearchStreamsAfterReconnect()
                         if self.rawStreamActive { break }
                     }
+                    attempt += 1
                     continue
                 }
 
@@ -1282,6 +1306,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                         detail: error.localizedDescription
                     )
                 }
+                attempt += 1
             }
             self.researchReconnectTask = nil
         }
