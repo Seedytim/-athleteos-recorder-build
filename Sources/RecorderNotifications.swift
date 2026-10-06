@@ -30,7 +30,7 @@ final class RecorderNotifications: NSObject, ObservableObject, UNUserNotificatio
             return Calendar.current.date(bySettingHour: minutes / 60, minute: minutes % 60, second: 0, of: Date()) ?? Date()
         }
         eveningTime = time("notifications.eveningTime", hour: 21)
-        morningTime = time("notifications.morningTime", hour: 7)
+        morningTime = time("notifications.morningTime", hour: 9)
         super.init()
         center.delegate = self
     }
