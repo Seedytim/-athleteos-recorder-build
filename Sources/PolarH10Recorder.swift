@@ -59,6 +59,8 @@ final class PolarH10Recorder: NSObject, ObservableObject {
     private var ecgStreamRunning = false
     private var accStreamRunning = false
     private var hrStreamRunning = false
+    private var lastECGAnchorAt: Date?
+    private var lastACCAnchorAt: Date?
     private var rawCaptureExpected = false
     private var scanTask: Task<Void, Never>?
     private var preparationTask: Task<Void, Never>?
@@ -158,8 +160,49 @@ final class PolarH10Recorder: NSObject, ObservableObject {
             rawStreamStatus = "Raw recovery warning: \(error.localizedDescription)"
         }
 
-        if rawCaptureExpected, currentExerciseId != nil, bluetoothOn, connectionState == .disconnected {
+        guard rawCaptureExpected, let expectedExercise = currentExerciseId, bluetoothOn else { return }
+
+        if connectionState == .disconnected {
             connect()
+        }
+
+        // A relaunch may occur while the independent H10 RR exercise is still running.
+        // Re-establish that fact before restarting PMD streams; never infer it from
+        // UserDefaults alone.
+        for _ in 0..<150 {
+            if connectionState == .connected && h10RecordingFeatureReady && fileTransferFeatureReady { break }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        guard connectionState == .connected, h10RecordingFeatureReady, fileTransferFeatureReady,
+              !nightActionInProgress, !fetchInProgress, !pftpOperationInProgress else { return }
+
+        pftpOperationInProgress = true
+        defer { pftpOperationInProgress = false }
+
+        do {
+            let status = try await requestStatusWithTimeout()
+            recordingOngoing = status.ongoing
+            guard status.ongoing else {
+                rawCaptureExpected = false
+                UserDefaults.standard.set(false, forKey: Keys.rawCaptureExpected)
+                rawStreamStatus = "Previous raw stream segment retained"
+                return
+            }
+
+            guard status.entryId == expectedExercise else {
+                try? await researchStore.appendEvent(
+                    kind: "recovery_identity_mismatch",
+                    detail: "Expected \(expectedExercise), H10 reported \(status.entryId). No high-resolution stream was restarted."
+                )
+                rawStreamStatus = "RR identity needs review"
+                return
+            }
+
+            pendingFetchAvailable = true
+            let startedAt = UserDefaults.standard.object(forKey: Keys.startedAt) as? Date ?? Date()
+            await startResearchCapture(exerciseId: expectedExercise, startedAt: startedAt)
+        } catch {
+            rawStreamStatus = "RR remains safe · high-resolution recovery failed"
         }
     }
 
@@ -1047,6 +1090,8 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         ecgStreamRunning = false
         accStreamRunning = false
         hrStreamRunning = false
+        lastECGAnchorAt = nil
+        lastACCAnchorAt = nil
 
         if let ecgSetting {
             ecgStreamRunning = true
@@ -1060,12 +1105,14 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                             ResearchECGSample(deviceTimestampNs: $0.timeStamp, voltageMicrovolts: $0.voltage)
                         }
                         try await self.researchStore.appendECG(samples)
-                        if let first = samples.first {
+                        if let first = samples.first,
+                           self.lastECGAnchorAt.map({ receivedAt.timeIntervalSince($0) >= 60 }) ?? true {
                             try await self.researchStore.appendTimeAnchor(
                                 channel: "ecg",
                                 deviceTimestampNs: first.deviceTimestampNs,
                                 hostReceivedAt: receivedAt
                             )
+                            self.lastECGAnchorAt = receivedAt
                         }
                         await self.refreshRawCaptureSize()
                     }
@@ -1092,12 +1139,14 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                             )
                         }
                         try await self.researchStore.appendACC(samples)
-                        if let first = samples.first {
+                        if let first = samples.first,
+                           self.lastACCAnchorAt.map({ receivedAt.timeIntervalSince($0) >= 60 }) ?? true {
                             try await self.researchStore.appendTimeAnchor(
                                 channel: "acc",
                                 deviceTimestampNs: first.deviceTimestampNs,
                                 hostReceivedAt: receivedAt
                             )
+                            self.lastACCAnchorAt = receivedAt
                         }
                         await self.refreshRawCaptureSize()
                     }
@@ -1144,20 +1193,10 @@ final class PolarH10Recorder: NSObject, ObservableObject {
     }
 
     private func streamEnded(channel: String, error: Error) async {
-        switch channel {
-        case "ECG": ecgStreamRunning = false
-        case "accelerometer": accStreamRunning = false
-        case "HR": hrStreamRunning = false
-        default: break
-        }
-        rawStreamActive = ecgStreamRunning || accStreamRunning || hrStreamRunning
-        try? await researchStore.appendEvent(
-            kind: "stream_error",
-            detail: "\(channel): \(error.localizedDescription)"
+        if Task.isCancelled { return }
+        await noteResearchGapAndReconnect(
+            detail: "\(channel) stream ended: \(error.localizedDescription)"
         )
-        rawStreamStatus = rawStreamActive
-            ? "Partial raw stream · \(channel) interrupted"
-            : "RR safe · high-resolution stream interrupted"
     }
 
     private func stopResearchCapture(reason: String) async {
@@ -1199,6 +1238,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
 
     private func noteResearchGapAndReconnect(detail: String) async {
         guard rawCaptureExpected else { return }
+        if researchReconnectTask != nil { return }
         ecgStreamTask?.cancel()
         accStreamTask?.cancel()
         hrStreamTask?.cancel()
@@ -1286,6 +1326,10 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                 // 25 Hz is already sufficient for overnight movement/restlessness,
                 // while materially reducing H10/iPhone battery and raw storage cost.
                 selected[type] = values.contains(25) ? 25 : values.min()
+            } else if type == .range || type == .rangeMilliunit {
+                // Overnight body movement is low amplitude; choose the smallest
+                // available accelerometer range for the highest useful resolution.
+                selected[type] = values.min()
             } else {
                 selected[type] = values.max()
             }
