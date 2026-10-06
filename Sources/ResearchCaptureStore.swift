@@ -15,12 +15,10 @@ struct ResearchACCSample: Sendable, Equatable {
 struct ResearchHRSample: Codable, Sendable, Equatable {
     let receivedAt: Date
     let bpm: UInt8
-    let correctedBpm: UInt8
     let rrMs: [Int]
     let rrAvailable: Bool
     let contactStatus: Bool
     let contactStatusSupported: Bool
-    let ppgQuality: UInt8
 }
 
 struct ResearchChannelDescriptor: Codable, Sendable, Equatable {
