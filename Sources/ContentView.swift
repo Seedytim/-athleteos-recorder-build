@@ -52,16 +52,12 @@ struct ContentView: View {
         if recorder.fetchInProgress { return "Keep your H10 nearby while the raw recording is saved to your phone." }
         if uploader.busy { return uploader.statusText }
         if sensorBusy { return recorder.statusText }
-        if recorder.recordingOngoing {
-            return recorder.rawStreamActive
-                ? "H10 raw RR is safe while your iPhone also captures ECG and movement. Keep the phone nearby; locking the screen is fine."
-                : "H10 raw RR is recording safely. Extra ECG/movement capture is unavailable or reconnecting."
-        }
+        if recorder.recordingOngoing { return "Your sensor is recording independently. Reconnect when you’re ready to finish." }
         if recorder.lastSavedFile != nil { return uploaded ? "AthleteOS has verified the raw recording." : "Your raw file is safe on this phone and will archive when AthleteOS is connected." }
         if recorder.pendingFetchAvailable { return "Reconnect to check or finish the recording and save it to your phone." }
         if recorder.connectionState == .connected && !ready { return recorder.preparationMessage }
         if uploader.lastUploadedRecordingId != nil && savedFiles.isEmpty { return uploader.statusText }
-        return ready ? "Your Polar H10 is ready to record raw overnight data." : "Wear your H10 with the strap moistened, then connect to begin."
+        return ready ? "Your Polar H10 is ready to record RR intervals." : "Wear your H10 with the strap moistened, then connect to begin."
     }
     private var actionTitle: String {
         if actionGate.running { return nightActionWasEnd ? "Ending night…" : "Starting night…" }
@@ -345,8 +341,8 @@ struct ContentView: View {
                 await upload(file.url)
             }
 
-            // Rich ECG/accelerometer/HR capture is an independent raw archive.
-            // Its failure never changes the verified RR cleanup rules above.
+            // Rich raw stream capture is archived independently. Failure here
+            // never changes the verified RR cleanup/deletion rules above.
             if uploader.isConnected {
                 let researchStore = ResearchCaptureStore.shared
                 let captures = try await researchStore.pendingArchives()
