@@ -56,9 +56,17 @@ final class PolarH10Recorder: NSObject, ObservableObject {
     private var accStreamTask: Task<Void, Never>?
     private var hrStreamTask: Task<Void, Never>?
     private var researchReconnectTask: Task<Void, Never>?
+    private var streamWatchdogTask: Task<Void, Never>?
     private var ecgStreamRunning = false
     private var accStreamRunning = false
     private var hrStreamRunning = false
+    private var researchStartInProgress = false
+    private var streamAttemptActive = false
+    private var expectedPMDChannels: Set<String> = []
+    private var streamAttemptStartedAt: Date?
+    private var lastPacketAt: [String: Date] = [:]
+    private var lastRawSizeRefreshAt: Date?
+    private var consecutivePMDRestartFailures = 0
     private var lastECGAnchorAt: Date?
     private var lastACCAnchorAt: Date?
     private var rawCaptureExpected = false
@@ -148,6 +156,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         accStreamTask?.cancel()
         hrStreamTask?.cancel()
         researchReconnectTask?.cancel()
+        streamWatchdogTask?.cancel()
     }
 
     func prepareRawCaptureRecovery() async {
@@ -203,6 +212,42 @@ final class PolarH10Recorder: NSObject, ObservableObject {
             await startResearchCapture(exerciseId: expectedExercise, startedAt: startedAt)
         } catch {
             rawStreamStatus = "RR remains safe · high-resolution recovery failed"
+        }
+    }
+
+    func appEnteredBackground() {
+        guard rawCaptureExpected else { return }
+        Task { [researchStore] in
+            try? await researchStore.appendEvent(
+                kind: "app_backgrounded",
+                detail: "Recorder entered the background; Core Bluetooth streaming remains required."
+            )
+        }
+    }
+
+    func appBecameActive() {
+        guard rawCaptureExpected, recordingOngoing else { return }
+        Task {
+            try? await researchStore.appendEvent(
+                kind: "app_foregrounded",
+                detail: "Recorder returned to the foreground and revalidated stream health."
+            )
+            guard researchReconnectTask == nil else { return }
+            guard let attemptStartedAt = streamAttemptStartedAt else {
+                scheduleResearchReconnect()
+                return
+            }
+            let stale = StreamHealthPolicy.staleChannels(
+                expectedChannels: expectedPMDChannels,
+                lastPacketAt: lastPacketAt,
+                attemptStartedAt: attemptStartedAt,
+                now: Date()
+            )
+            if !stale.isEmpty || !rawStreamActive {
+                await noteResearchGapAndReconnect(
+                    detail: "Foreground validation found stale \(stale.joined(separator: "+")) PMD data"
+                )
+            }
         }
     }
 
@@ -547,8 +592,10 @@ final class PolarH10Recorder: NSObject, ObservableObject {
             statusText = "H10 raw RR confirmed. Starting high-resolution raw streams…"
             await startResearchCapture(exerciseId: exerciseId, startedAt: startedAt)
 
-            if rawStreamActive {
-                statusText = "Recording raw RR + ECG + accelerometer."
+            if rawStreamActive || streamAttemptActive {
+                statusText = rawStreamActive
+                    ? "Recording raw RR + ECG + accelerometer."
+                    : "Raw RR is safe. Confirming ECG + accelerometer packets…"
             } else {
                 statusText = "H10 raw RR is safe. High-resolution stream is unavailable; the safety recording continues."
             }
@@ -930,6 +977,9 @@ final class PolarH10Recorder: NSObject, ObservableObject {
     }
 
     private func startResearchCapture(exerciseId: String, startedAt: Date) async {
+        guard !researchStartInProgress else { return }
+        researchStartInProgress = true
+        defer { researchStartInProgress = false }
         rawCaptureExpected = true
         UserDefaults.standard.set(true, forKey: Keys.rawCaptureExpected)
 
@@ -1041,7 +1091,8 @@ final class PolarH10Recorder: NSObject, ObservableObject {
     }
 
     private func resumeResearchStreamsAfterReconnect() async {
-        guard rawCaptureExpected, recordingOngoing, !rawStreamActive,
+        guard rawCaptureExpected, recordingOngoing, !rawStreamActive, !streamAttemptActive,
+              !researchStartInProgress,
               let exerciseId = currentExerciseId else { return }
         let startedAt = UserDefaults.standard.object(forKey: Keys.startedAt) as? Date ?? Date()
         await startResearchCapture(exerciseId: exerciseId, startedAt: startedAt)
@@ -1083,6 +1134,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
     }
 
     private func startStreamTasks(ecgSetting: PolarSensorSetting?, accSetting: PolarSensorSetting?) {
+        streamWatchdogTask?.cancel()
         ecgStreamTask?.cancel()
         accStreamTask?.cancel()
         hrStreamTask?.cancel()
@@ -1090,8 +1142,23 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         ecgStreamRunning = false
         accStreamRunning = false
         hrStreamRunning = false
+        rawStreamActive = false
+        streamAttemptActive = true
+        expectedPMDChannels = []
+        if ecgSetting != nil { expectedPMDChannels.insert("ecg") }
+        if accSetting != nil { expectedPMDChannels.insert("acc") }
+        streamAttemptStartedAt = Date()
+        lastPacketAt = [:]
         lastECGAnchorAt = nil
         lastACCAnchorAt = nil
+        let attemptStartedAt = streamAttemptStartedAt ?? Date()
+        let channelsForEvent = expectedPMDChannels
+        Task { [researchStore, channelsForEvent] in
+            try? await researchStore.appendEvent(
+                kind: "stream_start_attempt",
+                detail: "Starting \(channelsForEvent.sorted().joined(separator: "+")) PMD stream(s)."
+            )
+        }
 
         if let ecgSetting {
             ecgStreamRunning = true
@@ -1105,6 +1172,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                             ResearchECGSample(deviceTimestampNs: $0.timeStamp, voltageMicrovolts: $0.voltage)
                         }
                         try await self.researchStore.appendECG(samples)
+                        self.notePacket(channel: "ecg", receivedAt: receivedAt)
                         if let first = samples.first,
                            self.lastECGAnchorAt.map({ receivedAt.timeIntervalSince($0) >= 60 }) ?? true {
                             try await self.researchStore.appendTimeAnchor(
@@ -1115,6 +1183,13 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                             self.lastECGAnchorAt = receivedAt
                         }
                         await self.refreshRawCaptureSize()
+                    }
+                    if StreamHealthPolicy.shouldRecoverAfterTermination(
+                        captureExpected: self.rawCaptureExpected,
+                        recordingOngoing: self.recordingOngoing,
+                        taskCancelled: Task.isCancelled
+                    ) {
+                        await self.streamEnded(channel: "ECG", error: nil)
                     }
                 } catch {
                     await self.streamEnded(channel: "ECG", error: error)
@@ -1139,6 +1214,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                             )
                         }
                         try await self.researchStore.appendACC(samples)
+                        self.notePacket(channel: "acc", receivedAt: receivedAt)
                         if let first = samples.first,
                            self.lastACCAnchorAt.map({ receivedAt.timeIntervalSince($0) >= 60 }) ?? true {
                             try await self.researchStore.appendTimeAnchor(
@@ -1149,6 +1225,13 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                             self.lastACCAnchorAt = receivedAt
                         }
                         await self.refreshRawCaptureSize()
+                    }
+                    if StreamHealthPolicy.shouldRecoverAfterTermination(
+                        captureExpected: self.rawCaptureExpected,
+                        recordingOngoing: self.recordingOngoing,
+                        taskCancelled: Task.isCancelled
+                    ) {
+                        await self.streamEnded(channel: "accelerometer", error: nil)
                     }
                 } catch {
                     await self.streamEnded(channel: "accelerometer", error: error)
@@ -1175,7 +1258,15 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                             )
                         }
                         try await self.researchStore.appendHR(samples)
+                        self.notePacket(channel: "hr", receivedAt: receivedAt)
                         await self.refreshRawCaptureSize()
+                    }
+                    if StreamHealthPolicy.shouldRecoverAfterTermination(
+                        captureExpected: self.rawCaptureExpected,
+                        recordingOngoing: self.recordingOngoing,
+                        taskCancelled: Task.isCancelled
+                    ) {
+                        await self.streamEnded(channel: "HR", error: nil)
                     }
                 } catch {
                     await self.streamEnded(channel: "HR", error: error)
@@ -1183,16 +1274,68 @@ final class PolarH10Recorder: NSObject, ObservableObject {
             }
         }
 
-        rawStreamActive = ecgStreamRunning || accStreamRunning || hrStreamRunning
         let channels = [
             ecgStreamRunning ? "ECG" : nil,
             accStreamRunning ? "ACC" : nil,
             hrStreamRunning ? "HR" : nil
         ].compactMap { $0 }
-        rawStreamStatus = channels.isEmpty ? "RR only" : channels.joined(separator: " + ")
+        rawStreamStatus = channels.isEmpty ? "RR only" : "Starting " + channels.joined(separator: " + ")
+        startStreamWatchdog(attemptStartedAt: attemptStartedAt)
     }
 
-    private func streamEnded(channel: String, error: Error) async {
+    private func notePacket(channel: String, receivedAt: Date) {
+        lastPacketAt[channel] = receivedAt
+        guard StreamHealthPolicy.recoveryConfirmed(
+            expectedChannels: expectedPMDChannels,
+            lastPacketAt: lastPacketAt,
+            attemptStartedAt: streamAttemptStartedAt ?? receivedAt
+        ) else { return }
+
+        let wasStarting = streamAttemptActive
+        streamAttemptActive = false
+        rawStreamActive = true
+        consecutivePMDRestartFailures = 0
+        let channels = expectedPMDChannels.sorted().map { $0.uppercased() }.joined(separator: " + ")
+        rawStreamStatus = channels.isEmpty ? "RR only" : channels + " live"
+        if wasStarting {
+            Task { [researchStore] in
+                try? await researchStore.appendEvent(
+                    kind: "stream_healthy",
+                    detail: "Fresh packets received from every expected PMD channel."
+                )
+            }
+        }
+    }
+
+    private func startStreamWatchdog(attemptStartedAt: Date) {
+        streamWatchdogTask?.cancel()
+        streamWatchdogTask = Task { [weak self] in
+            guard let self else { return }
+            while self.rawCaptureExpected && self.recordingOngoing {
+                do { try await Task.sleep(for: .seconds(5)) } catch { break }
+                if Task.isCancelled || !self.rawCaptureExpected || !self.recordingOngoing { break }
+                // The reconnect loop performs its own packet-confirmation wait.
+                if self.researchReconnectTask != nil { continue }
+                let stale = StreamHealthPolicy.staleChannels(
+                    expectedChannels: self.expectedPMDChannels,
+                    lastPacketAt: self.lastPacketAt,
+                    attemptStartedAt: attemptStartedAt,
+                    now: Date()
+                )
+                guard !stale.isEmpty else { continue }
+                try? await self.researchStore.appendEvent(
+                    kind: "stream_stalled",
+                    detail: "No fresh packets from: \(stale.joined(separator: ", "))."
+                )
+                await self.noteResearchGapAndReconnect(
+                    detail: "PMD watchdog detected stale \(stale.joined(separator: "+")) data"
+                )
+                break
+            }
+        }
+    }
+
+    private func streamEnded(channel: String, error: Error?) async {
         if Task.isCancelled { return }
         // HR is an opportunistic QA channel. It must never tear down healthy
         // ECG/ACC streams if the standard Heart Rate Service ends by itself.
@@ -1203,12 +1346,16 @@ final class PolarH10Recorder: NSObject, ObservableObject {
             rawStreamStatus = rawStreamActive ? "ECG + ACC · HR unavailable" : "RR only · HR unavailable"
             try? await researchStore.appendEvent(
                 kind: "optional_hr_stream_ended",
-                detail: error.localizedDescription
+                detail: error?.localizedDescription ?? "The SDK stream completed without an error."
             )
             return
         }
+        if channel == "ECG" { ecgStreamRunning = false }
+        if channel == "accelerometer" { accStreamRunning = false }
+        streamAttemptActive = false
+        rawStreamActive = false
         await noteResearchGapAndReconnect(
-            detail: "\(channel) stream ended: \(error.localizedDescription)"
+            detail: "\(channel) stream ended: \(error?.localizedDescription ?? "the SDK stream completed without an error")"
         )
     }
 
@@ -1219,6 +1366,8 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         UserDefaults.standard.set(false, forKey: Keys.rawCaptureExpected)
         researchReconnectTask?.cancel()
         researchReconnectTask = nil
+        streamWatchdogTask?.cancel()
+        streamWatchdogTask = nil
 
         ecgStreamTask?.cancel()
         accStreamTask?.cancel()
@@ -1236,6 +1385,10 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         ecgStreamRunning = false
         accStreamRunning = false
         hrStreamRunning = false
+        streamAttemptActive = false
+        expectedPMDChannels = []
+        streamAttemptStartedAt = nil
+        lastPacketAt = [:]
         rawStreamActive = false
 
         if hadCapture {
@@ -1253,6 +1406,8 @@ final class PolarH10Recorder: NSObject, ObservableObject {
     private func noteResearchGapAndReconnect(detail: String) async {
         guard rawCaptureExpected else { return }
         if researchReconnectTask != nil { return }
+        streamWatchdogTask?.cancel()
+        streamWatchdogTask = nil
         ecgStreamTask?.cancel()
         accStreamTask?.cancel()
         hrStreamTask?.cancel()
@@ -1262,6 +1417,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
         ecgStreamRunning = false
         accStreamRunning = false
         hrStreamRunning = false
+        streamAttemptActive = false
         rawStreamActive = false
         rawStreamStatus = "RR safe · reconnecting high-resolution stream"
         // Install the recovery task before the first await so simultaneous ECG
@@ -1292,7 +1448,61 @@ final class PolarH10Recorder: NSObject, ObservableObject {
                 if self.connectionState == .connected {
                     if self.onlineStreamingFeatureReady {
                         await self.resumeResearchStreamsAfterReconnect()
-                        if self.rawStreamActive { break }
+                        // Creating AsyncSequence tasks is not recovery. Require a
+                        // fresh packet from every advertised PMD channel.
+                        for _ in 0..<30 {
+                            if self.rawStreamActive && StreamHealthPolicy.recoveryConfirmed(
+                                expectedChannels: self.expectedPMDChannels,
+                                lastPacketAt: self.lastPacketAt,
+                                attemptStartedAt: self.streamAttemptStartedAt ?? Date()
+                            ) { break }
+                            do { try await Task.sleep(for: .milliseconds(500)) } catch { break }
+                        }
+                        if self.rawStreamActive && StreamHealthPolicy.recoveryConfirmed(
+                            expectedChannels: self.expectedPMDChannels,
+                            lastPacketAt: self.lastPacketAt,
+                            attemptStartedAt: self.streamAttemptStartedAt ?? Date()
+                        ) {
+                            self.consecutivePMDRestartFailures = 0
+                            break
+                        }
+
+                        self.consecutivePMDRestartFailures += 1
+                        try? await self.researchStore.appendEvent(
+                            kind: "stream_restart_unconfirmed",
+                            detail: "Restart attempt \(attempt + 1) produced no complete ECG/ACC packet confirmation."
+                        )
+                        self.streamWatchdogTask?.cancel()
+                        self.ecgStreamTask?.cancel()
+                        self.accStreamTask?.cancel()
+                        self.hrStreamTask?.cancel()
+                        self.ecgStreamRunning = false
+                        self.accStreamRunning = false
+                        self.hrStreamRunning = false
+                        self.streamAttemptActive = false
+                        self.rawStreamActive = false
+                        try? await self.api.stopStreaming(self.deviceId, type: .ecg)
+                        try? await self.api.stopStreaming(self.deviceId, type: .acc)
+                        try? await self.api.stopHrStreaming(self.deviceId)
+
+                        // A stale PMD/GATT session may accept a start command but
+                        // never deliver data. Reset the BLE session after two such
+                        // failures while the independent H10 RR record continues.
+                        if self.consecutivePMDRestartFailures >= 2 {
+                            try? await self.researchStore.appendEvent(
+                                kind: "ble_reset_for_stream_recovery",
+                                detail: "Two PMD restarts failed packet confirmation; resetting BLE."
+                            )
+                            try? self.api.disconnectFromDevice(self.deviceId)
+                            for _ in 0..<60 {
+                                if self.connectionState == .disconnected { break }
+                                do { try await Task.sleep(for: .milliseconds(100)) } catch { break }
+                            }
+                            if self.connectionState == .disconnected {
+                                try? self.api.connectToDevice(self.deviceId)
+                            }
+                            self.consecutivePMDRestartFailures = 0
+                        }
                     }
                     attempt += 1
                     continue
@@ -1313,6 +1523,10 @@ final class PolarH10Recorder: NSObject, ObservableObject {
     }
 
     private func refreshRawCaptureSize() async {
+        let now = Date()
+        if let lastRawSizeRefreshAt,
+           now.timeIntervalSince(lastRawSizeRefreshAt) < 5 { return }
+        lastRawSizeRefreshAt = now
         if let summary = await researchStore.activeSummary() {
             rawCaptureBytes = summary.totalBytes
         }

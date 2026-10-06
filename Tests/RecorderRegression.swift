@@ -4,6 +4,7 @@ import Foundation
 struct RecorderRegression {
     static func main() async throws {
         testConnectionTransitions()
+        testStreamHealthPolicy()
         let id = UUID().uuidString
         let sha = String(repeating: "a", count: 64)
         func receipt(archived: Bool = true, verified: Bool = true, hash: String? = nil, processing: String = "complete") -> Data {
@@ -42,6 +43,52 @@ struct RecorderRegression {
         try await testUploaderTransport(raw: raw)
         #endif
         print("PASS: verified archive receipts only, SHA must match, raw samples preserved, queue files discoverable and independently deletable")
+    }
+
+    static func testStreamHealthPolicy() {
+        let start = Date(timeIntervalSince1970: 1_000)
+        let expected: Set<String> = ["ecg", "acc"]
+        precondition(StreamHealthPolicy.staleChannels(
+            expectedChannels: expected,
+            lastPacketAt: [:],
+            attemptStartedAt: start,
+            now: start.addingTimeInterval(14)
+        ).isEmpty, "Startup grace must not trigger a premature reconnect")
+        precondition(Set(StreamHealthPolicy.staleChannels(
+            expectedChannels: expected,
+            lastPacketAt: [:],
+            attemptStartedAt: start,
+            now: start.addingTimeInterval(16)
+        )) == expected, "A stream that never produces samples must be restarted")
+        precondition(StreamHealthPolicy.staleChannels(
+            expectedChannels: expected,
+            lastPacketAt: ["ecg": start.addingTimeInterval(15), "acc": start.addingTimeInterval(15)],
+            attemptStartedAt: start,
+            now: start.addingTimeInterval(24)
+        ).isEmpty)
+        precondition(StreamHealthPolicy.staleChannels(
+            expectedChannels: expected,
+            lastPacketAt: ["ecg": start.addingTimeInterval(15), "acc": start.addingTimeInterval(25)],
+            attemptStartedAt: start,
+            now: start.addingTimeInterval(26)
+        ) == ["ecg"], "A silently stalled channel must be identified independently")
+        precondition(!StreamHealthPolicy.recoveryConfirmed(
+            expectedChannels: expected,
+            lastPacketAt: ["ecg": start.addingTimeInterval(1)],
+            attemptStartedAt: start
+        ), "Task creation or a single channel must not count as recovery")
+        precondition(StreamHealthPolicy.recoveryConfirmed(
+            expectedChannels: expected,
+            lastPacketAt: ["ecg": start.addingTimeInterval(1), "acc": start.addingTimeInterval(2)],
+            attemptStartedAt: start
+        ), "Every expected PMD channel must deliver a fresh packet")
+        precondition(StreamHealthPolicy.shouldRecoverAfterTermination(
+            captureExpected: true, recordingOngoing: true, taskCancelled: false
+        ), "Normal AsyncSequence completion must trigger recovery")
+        precondition(!StreamHealthPolicy.shouldRecoverAfterTermination(
+            captureExpected: true, recordingOngoing: true, taskCancelled: true
+        ), "Intentional cancellation must not trigger recovery")
+        print("PASS: PMD startup grace, silent-stall detection, normal completion recovery, and packet-confirmed restart")
     }
     static func testConnectionTransitions() {
         func step(on: Bool = true, connected: Bool = false, record: Bool = false,
@@ -220,6 +267,12 @@ struct RecorderRegression {
         guard let completedArchive = pendingArchives.first(where: { $0.captureId == second.captureId }) else {
             preconditionFailure("Completed raw stream capture must remain discoverable")
         }
+        precondition(completedArchive.manifest.captureQuality == "completed_with_gaps")
+        let completedECG = completedArchive.manifest.channelCoverage?["ecg"]
+        precondition(completedECG?.receivedSamples == 1)
+        precondition(abs((completedECG?.wallClockSeconds ?? 0) - 100) < 0.001)
+        precondition((completedECG?.coveragePct ?? 100) < 1,
+                     "Manifest must disclose wall-clock coverage rather than calling sparse data continuous")
         let archiveNames = Set(completedArchive.files.map(\.fileName))
         precondition(archiveNames.contains("manifest.json") && archiveNames.contains("events.ndjson") && archiveNames.contains("ecg-0000.bin"),
                      "Archive plan must include provenance and exact raw chunks")

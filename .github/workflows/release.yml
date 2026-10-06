@@ -22,7 +22,7 @@ jobs:
 
       - name: Regression tests
         run: |
-          swiftc Sources/NightConnectionPolicy.swift Sources/RecordingModels.swift Sources/RecordingStore.swift Sources/ResearchCaptureStore.swift Sources/UploadReceipt.swift Sources/AthleteOSUploader.swift Tests/RecorderRegression.swift -o /tmp/recorder-regression
+          swiftc Sources/NightConnectionPolicy.swift Sources/StreamHealthPolicy.swift Sources/RecordingModels.swift Sources/RecordingStore.swift Sources/ResearchCaptureStore.swift Sources/UploadReceipt.swift Sources/AthleteOSUploader.swift Tests/RecorderRegression.swift -o /tmp/recorder-regression
           /tmp/recorder-regression
 
       - name: Install XcodeGen
@@ -58,7 +58,7 @@ jobs:
           BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP/Info.plist")
           echo "Built Recorder version=$VERSION build=$BUILD"
           test "$VERSION" = "2.1.2"
-          test "$BUILD" = "18"
+          test "$BUILD" = "19"
 
           # Preserve the existing Home Screen night recorder widget.
           WIDGET="$APP/PlugIns/RecorderWidget.appex"
@@ -174,7 +174,7 @@ jobs:
                       "version": version,
                       "buildVersion": build,
                       "date": date,
-                      "localizedDescription": "Includes H10 timeout hardening: 45-second operations and 240-second stored RR reads, with reconnect retries and retained sensor data on failure.",
+                      "localizedDescription": "Adds packet-confirmed ECG and accelerometer recovery, silent-stream watchdogs, BLE reset fallback, and explicit wall-clock coverage diagnostics.",
                       "downloadURL": download,
                       "size": int(size),
                       "minOSVersion": "16.0",

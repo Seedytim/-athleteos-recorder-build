@@ -50,6 +50,14 @@ struct ResearchCaptureFile: Codable, Sendable, Equatable {
     var recordCount: UInt64
 }
 
+struct ResearchChannelCoverage: Codable, Sendable, Equatable {
+    let expectedSampleRateHz: UInt32
+    let receivedSamples: UInt64
+    let recordedSeconds: Double
+    let wallClockSeconds: Double
+    let coveragePct: Double
+}
+
 struct ResearchCaptureManifest: Codable, Sendable, Equatable {
     var schemaVersion: Int
     var captureId: UUID
@@ -64,6 +72,10 @@ struct ResearchCaptureManifest: Codable, Sendable, Equatable {
     var rawValuePolicy: String
     var channels: [ResearchChannelDescriptor]
     var files: [ResearchCaptureFile]
+    /// Final wall-clock coverage. Optional so build-19 can still decode archives
+    /// created by older Recorder builds without mutating their raw files.
+    var channelCoverage: [String: ResearchChannelCoverage]? = nil
+    var captureQuality: String? = nil
 }
 
 struct ResearchCaptureEvent: Codable, Sendable, Equatable {
@@ -272,6 +284,7 @@ actor ResearchCaptureStore {
             }
             manifest.state = FinalState.interrupted.rawValue
             manifest.endedAt = now
+            finalizeCoverage(manifest: &manifest, endedAt: now)
             try writeManifest(manifest, to: manifestURL)
             recovered += 1
         }
@@ -343,6 +356,7 @@ actor ResearchCaptureStore {
         capture.manifest.state = state.rawValue
         capture.manifest.endedAt = endedAt
         capture.manifest.batteryPercentAtEnd = batteryPercentAtEnd
+        finalizeCoverage(manifest: &capture.manifest, endedAt: endedAt)
         try writeManifest(capture.manifest, to: capture.manifestURL)
 
         let total = capture.manifest.files.reduce(UInt64(0)) { $0 + $1.byteCount }
@@ -655,6 +669,38 @@ actor ResearchCaptureStore {
         if recordEncoding == "little_endian:uint64_timestamp_ns,int32_microvolts" { return 12 }
         if recordEncoding == "little_endian:uint64_timestamp_ns,int32_x_mg,int32_y_mg,int32_z_mg" { return 20 }
         return nil
+    }
+
+    private func finalizeCoverage(manifest: inout ResearchCaptureManifest, endedAt: Date) {
+        let wallClockSeconds = max(0, endedAt.timeIntervalSince(manifest.startedAt))
+        var coverage: [String: ResearchChannelCoverage] = [:]
+        for descriptor in manifest.channels {
+            guard let rate = descriptor.sampleRateHz, rate > 0 else { continue }
+            let received = manifest.files
+                .filter { $0.channel == descriptor.channel }
+                .reduce(UInt64(0)) { $0 + $1.recordCount }
+            let recordedSeconds = Double(received) / Double(rate)
+            let denominator = wallClockSeconds * Double(rate)
+            let percent = denominator > 0
+                ? min(100, (Double(received) / denominator) * 100)
+                : 0
+            coverage[descriptor.channel] = ResearchChannelCoverage(
+                expectedSampleRateHz: rate,
+                receivedSamples: received,
+                recordedSeconds: recordedSeconds,
+                wallClockSeconds: wallClockSeconds,
+                coveragePct: percent
+            )
+        }
+        manifest.channelCoverage = coverage
+        let requiredCoverage = coverage.values.map(\.coveragePct)
+        if requiredCoverage.isEmpty {
+            manifest.captureQuality = "no_rate_based_channels"
+        } else if requiredCoverage.allSatisfy({ $0 >= 98 }) {
+            manifest.captureQuality = "continuous"
+        } else {
+            manifest.captureQuality = "completed_with_gaps"
+        }
     }
 
     private func appendLittleEndian<T: FixedWidthInteger>(_ value: T, to data: inout Data) {
