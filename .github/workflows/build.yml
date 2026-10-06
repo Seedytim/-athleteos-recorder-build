@@ -22,6 +22,8 @@ jobs:
           /tmp/recorder-regression
       - name: Install XcodeGen
         run: brew install xcodegen
+      - name: Generate app icon assets
+        run: python3 Scripts/generate_app_icons.py
       - name: Generate Xcode project
         run: xcodegen generate
       - name: Cache pinned Polar dependencies
