@@ -5,6 +5,7 @@ struct RecorderRegression {
     static func main() async throws {
         testConnectionTransitions()
         try testMorningSaveSourceInvariants()
+        try testBuild28ReleaseInvariants()
         testStreamHealthPolicy()
         let id = UUID().uuidString
         let sha = String(repeating: "a", count: 64)
@@ -209,6 +210,32 @@ struct RecorderRegression {
         precondition(NightActionPolicy.afterRecovery(requestedEnd: false, recordingOngoing: false, pendingFetch: false) == .start)
         precondition(NightActionPolicy.afterRecovery(requestedEnd: false, recordingOngoing: true, pendingFetch: false) == .end)
         print("PASS: disconnected connection ownership, both services required, PFTP arbitration, bounded reconnect, Bluetooth loss")
+    }
+
+    static func testBuild28ReleaseInvariants() throws {
+        let recorder = try String(contentsOfFile: "Sources/PolarH10Recorder.swift", encoding: .utf8)
+        let notifications = try String(contentsOfFile: "Sources/RecorderNotifications.swift", encoding: .utf8)
+        let project = try String(contentsOfFile: "project.yml", encoding: .utf8)
+        let release = try String(contentsOfFile: ".github/workflows/release.yml", encoding: .utf8)
+
+        precondition(project.components(separatedBy: "CURRENT_PROJECT_VERSION: 28").count == 3,
+                     "App and widget must both move to build 28")
+        precondition(release.contains("test \"$BUILD\" = \"28\""),
+                     "Release gate must require build 28")
+        precondition(!release.contains("RR, ECG and movement"),
+                     "Build 28 release metadata must not claim continuous ECG")
+        precondition(recorder.contains("both required signals (RR and movement)"),
+                     "Runtime startup failure wording must match the two required signals")
+        precondition(!recorder.contains("all three channels"),
+                     "Runtime wording must not retain the old three-channel requirement")
+        precondition(notifications.contains("morningTime = time(\"notifications.morningTime\", hour: 9)"),
+                     "Fresh installs must default the End-night reminder to 09:00")
+        precondition(notifications.contains("storedMorning == 7 * 60"),
+                     "Upgrades must migrate the old 07:00 default")
+        precondition(notifications.contains("storedMorning == nil || storedMorning == 7 * 60"),
+                     "The migration must preserve custom reminder times")
+
+        print("PASS: build 28 release gate, ECG-free metadata, two-signal wording, and 09:00 reminder migration")
     }
 
     static func testMorningSaveSourceInvariants() throws {
