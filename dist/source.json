@@ -11,12 +11,12 @@
       "iconURL": "https://athleteos-pink-sigma.vercel.app/recorder/icon.png",
       "versions": [
         {
-          "version": "2.2.0",
-          "buildVersion": "28",
-          "date": "2026-10-07T00:55:06Z",
+          "version": "2.2.1",
+          "buildVersion": "29",
+          "date": "2026-10-07T01:30:00Z",
           "localizedDescription": "Phone-owned live RR and movement recording with durable local chunks, reconnect recovery and precise packet timing anchors. Continuous ECG is not recorded. Keep Bluetooth on and iPhone nearby; missed Bluetooth samples cannot be recovered. End night saves without a sensor fetch. Physical full-night validation remains pending.",
-          "downloadURL": "https://github.com/Seedytim/-athleteos-recorder-build/releases/download/recorder-v2.2.0-build28/AthleteOSRecorder.ipa",
-          "size": 4194162,
+          "downloadURL": "https://github.com/Seedytim/-athleteos-recorder-build/releases/download/recorder-v2.2.1-build29/AthleteOSRecorder.ipa",
+          "size": 4193744,
           "minOSVersion": "16.0"
         }
       ]

@@ -1,9 +1,9 @@
 {
-  "version": "2.2.0",
-  "build": "28",
-  "size": 4194162,
-  "sha256": "cb8f1255baabc29e3071c754b9c57a1f1748c815fca8b245639cb07533db6241",
-  "source_commit": "0394ef2329b6d7e1b43e65ca0f821140debe407c",
-  "release_tag": "recorder-v2.2.0-build28",
-  "download_url": "https://github.com/Seedytim/-athleteos-recorder-build/releases/download/recorder-v2.2.0-build28/AthleteOSRecorder.ipa"
+  "version": "2.2.1",
+  "build": "29",
+  "size": 4193744,
+  "sha256": "d97277ad671bb39b1c5d316ae03a6a0264a1abe80e497f7b5aa17339acb3da7a",
+  "source_commit": "0a2251298956d0cf609ba6a49a5031a48f96371f",
+  "release_tag": "recorder-v2.2.1-build29",
+  "download_url": "https://github.com/Seedytim/-athleteos-recorder-build/releases/download/recorder-v2.2.1-build29/AthleteOSRecorder.ipa"
 }
