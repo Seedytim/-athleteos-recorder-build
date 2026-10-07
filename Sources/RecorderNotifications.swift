@@ -25,12 +25,24 @@ final class RecorderNotifications: NSObject, ObservableObject, UNUserNotificatio
         enabled = d.bool(forKey: "notifications.enabled")
         eveningEnabled = d.object(forKey: "notifications.evening") as? Bool ?? true
         morningEnabled = d.object(forKey: "notifications.morning") as? Bool ?? true
+
+        // Build 28 changes the intended default End-night reminder from 07:00 to
+        // 09:00. Migrate only the old default (or an unset value); preserve any
+        // custom time the user deliberately chose.
+        if !d.bool(forKey: "notifications.morning0900MigrationApplied") {
+            let storedMorning = d.object(forKey: "notifications.morningTime") as? Int
+            if storedMorning == nil || storedMorning == 7 * 60 {
+                d.set(9 * 60, forKey: "notifications.morningTime")
+            }
+            d.set(true, forKey: "notifications.morning0900MigrationApplied")
+        }
+
         func time(_ key: String, hour: Int) -> Date {
             let minutes = d.object(forKey: key) as? Int ?? hour * 60
             return Calendar.current.date(bySettingHour: minutes / 60, minute: minutes % 60, second: 0, of: Date()) ?? Date()
         }
         eveningTime = time("notifications.eveningTime", hour: 21)
-        morningTime = time("notifications.morningTime", hour: 7)
+        morningTime = time("notifications.morningTime", hour: 9)
         super.init()
         center.delegate = self
     }
