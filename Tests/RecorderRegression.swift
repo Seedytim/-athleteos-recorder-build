@@ -4,6 +4,7 @@ import Foundation
 struct RecorderRegression {
     static func main() async throws {
         testConnectionTransitions()
+        testReminderPolicy()
         try testMorningSaveSourceInvariants()
         try testBuild28ReleaseInvariants()
         testStreamHealthPolicy()
@@ -210,6 +211,44 @@ struct RecorderRegression {
         precondition(NightActionPolicy.afterRecovery(requestedEnd: false, recordingOngoing: false, pendingFetch: false) == .start)
         precondition(NightActionPolicy.afterRecovery(requestedEnd: false, recordingOngoing: true, pendingFetch: false) == .end)
         print("PASS: disconnected connection ownership, both services required, PFTP arbitration, bounded reconnect, Bluetooth loss")
+    }
+
+    static func testReminderPolicy() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let start = Date(timeIntervalSince1970: 1791316800) // 2026-10-06 20:00 UTC
+        let beforeNine = Date(timeIntervalSince1970: 1791360000) // 2026-10-07 08:00 UTC
+        let plan = RecorderCompanionPolicy.reminderPlan(
+            enabled: true,
+            authorized: true,
+            eveningEnabled: true,
+            morningEnabled: true,
+            nightPending: true,
+            startedAt: start,
+            morningHour: 9,
+            morningMinute: 0,
+            now: beforeNine,
+            calendar: calendar
+        )
+        let expected = calendar.date(from: DateComponents(year: 2026, month: 10, day: 7, hour: 9, minute: 0))!
+        precondition(plan.evening == false && plan.morning == expected,
+                     "A pending night must suppress the evening prompt and schedule the 09:00 End-night reminder")
+
+        let completed = RecorderCompanionPolicy.reminderPlan(
+            enabled: true,
+            authorized: true,
+            eveningEnabled: true,
+            morningEnabled: true,
+            nightPending: false,
+            startedAt: nil,
+            morningHour: 9,
+            morningMinute: 0,
+            now: beforeNine,
+            calendar: calendar
+        )
+        precondition(completed.evening == true && completed.morning == nil,
+                     "No morning reminder may remain once the night is no longer pending")
+        print("PASS: 09:00 morning reminder exists only while a night is pending")
     }
 
     static func testBuild28ReleaseInvariants() throws {
