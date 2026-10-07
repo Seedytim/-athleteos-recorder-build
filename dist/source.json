@@ -12,11 +12,11 @@
       "versions": [
         {
           "version": "2.2.0",
-          "buildVersion": "27",
-          "date": "2026-10-06T22:48:17Z",
-          "localizedDescription": "Phone-owned live RR, ECG and movement recording with durable local chunks, reconnect recovery and precise packet timing anchors. Keep Bluetooth on and iPhone nearby; missed Bluetooth samples cannot be recovered. End night saves without a sensor fetch. Physical full-night validation remains pending.",
-          "downloadURL": "https://github.com/Seedytim/-athleteos-recorder-build/releases/download/recorder-v2.2.0-build27/AthleteOSRecorder.ipa",
-          "size": 4198165,
+          "buildVersion": "28",
+          "date": "2026-10-07T00:55:06Z",
+          "localizedDescription": "Phone-owned live RR and movement recording with durable local chunks, reconnect recovery and precise packet timing anchors. Continuous ECG is not recorded. Keep Bluetooth on and iPhone nearby; missed Bluetooth samples cannot be recovered. End night saves without a sensor fetch. Physical full-night validation remains pending.",
+          "downloadURL": "https://github.com/Seedytim/-athleteos-recorder-build/releases/download/recorder-v2.2.0-build28/AthleteOSRecorder.ipa",
+          "size": 4194162,
           "minOSVersion": "16.0"
         }
       ]
