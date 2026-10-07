@@ -447,7 +447,7 @@ struct ContentView: View {
                 Section("Diagnostics") {
                     Text(recorder.statusText).font(.footnote).textSelection(.enabled)
                     if let id = recorder.currentExerciseId { LabeledContent("Exercise", value: id).font(.caption) }
-                    Text("Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "")").font(.caption).foregroundStyle(.secondary)
+                    Text("Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "") (\(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? ""))").font(.caption).foregroundStyle(.secondary)
                 }
             }
             .navigationTitle("Settings").navigationBarTitleDisplayMode(.inline)
