@@ -6,7 +6,7 @@ struct RecorderRegression {
         testConnectionTransitions()
         testReminderPolicy()
         try testMorningSaveSourceInvariants()
-        try testBuild28ReleaseInvariants()
+        try testBuild29ReleaseInvariants()
         testStreamHealthPolicy()
         let id = UUID().uuidString
         let sha = String(repeating: "a", count: 64)
@@ -251,18 +251,23 @@ struct RecorderRegression {
         print("PASS: 09:00 morning reminder exists only while a night is pending")
     }
 
-    static func testBuild28ReleaseInvariants() throws {
+    static func testBuild29ReleaseInvariants() throws {
         let recorder = try String(contentsOfFile: "Sources/PolarH10Recorder.swift", encoding: .utf8)
         let notifications = try String(contentsOfFile: "Sources/RecorderNotifications.swift", encoding: .utf8)
         let project = try String(contentsOfFile: "project.yml", encoding: .utf8)
         let release = try String(contentsOfFile: ".github/workflows/release.yml", encoding: .utf8)
 
-        precondition(project.components(separatedBy: "CURRENT_PROJECT_VERSION: 28").count == 3,
-                     "App and widget must both move to build 28")
-        precondition(release.contains("test \"$BUILD\" = \"28\""),
-                     "Release gate must require build 28")
+        precondition(project.components(separatedBy: "CURRENT_PROJECT_VERSION: 29").count == 3,
+                     "App and widget must both move to build 29")
+        precondition(project.components(separatedBy: "MARKETING_VERSION: 2.2.1").count == 3,
+                     "App and widget must both advertise version 2.2.1")
+        let content = try String(contentsOfFile: "Sources/ContentView.swift", encoding: .utf8)
+        precondition(content.contains("CFBundleVersion"),
+                     "Settings must show the internal build number so installed versions are unambiguous")
+        precondition(release.contains("test \"$BUILD\" = \"29\""),
+                     "Release gate must require build 29")
         precondition(!release.contains("RR, ECG and movement"),
-                     "Build 28 release metadata must not claim continuous ECG")
+                     "Build 29 release metadata must not claim continuous ECG")
         precondition(recorder.contains("both required signals (RR and movement)"),
                      "Runtime startup failure wording must match the two required signals")
         precondition(!recorder.contains("all three channels"),
@@ -274,7 +279,7 @@ struct RecorderRegression {
         precondition(notifications.contains("storedMorning == nil || storedMorning == 7 * 60"),
                      "The migration must preserve custom reminder times")
 
-        print("PASS: build 28 release gate, ECG-free metadata, two-signal wording, and 09:00 reminder migration")
+        print("PASS: build 29 release gate, ECG-free metadata, two-signal wording, and 09:00 reminder migration")
     }
 
     static func testMorningSaveSourceInvariants() throws {
