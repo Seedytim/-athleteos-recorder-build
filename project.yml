@@ -30,6 +30,7 @@ targets:
         SWIFT_VERSION: 5.9
         TARGETED_DEVICE_FAMILY: "1"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_ENTITLEMENTS: Resources/AthleteOSRecorder.entitlements
     info:
       path: Resources/Info.plist
       properties:
@@ -37,6 +38,8 @@ targets:
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         NSBluetoothAlwaysUsageDescription: AthleteOS Recorder connects to your Polar H10 to preserve raw overnight RR, heart-rate and accelerometer data.
+        NSHealthUpdateUsageDescription: AthleteOS Recorder can export one user-approved Polar H10 heartbeat and SDNN test into Apple Health.
+        NSHealthShareUsageDescription: AthleteOS Recorder may access its exported HealthKit samples for compatibility testing.
         CFBundleURLTypes:
           - CFBundleURLName: nz.co.athleteos.recorder
             CFBundleURLSchemes:
