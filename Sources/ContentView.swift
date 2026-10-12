@@ -18,6 +18,8 @@ struct ContentView: View {
     @State private var showRecordings = false
     @State private var savedFiles: [SavedRecordingFile] = []
     @State private var uploadPassInProgress = false
+    @StateObject private var healthPilot = RecorderHealthKitPilot()
+    @AppStorage("healthkit.testNextNight") private var healthPilotArmed = false
     @Environment(\.scenePhase) private var scenePhase
     @ScaledMetric(relativeTo: .title) private var heroDiameter = 132.0
 
@@ -298,6 +300,7 @@ struct ContentView: View {
     private func primaryAction() {
         guard actionGate.begin() else { return }
         nightActionWasEnd = recorder.phoneNightPending
+        let wasEndingNight = recorder.phoneNightPending
         Task {
             defer { actionGate.finish() }
             await notifications.refreshAuthorization()
@@ -306,6 +309,13 @@ struct ContentView: View {
                 try? await Task.sleep(for: .milliseconds(200))
             }
             await recorder.performNightAction()
+            // The existing verified archive path deletes the local RR file.
+            // The explicitly armed one-shot pilot must therefore run first.
+            if wasEndingNight && !recorder.phoneNightPending && recorder.lastError == nil,
+               healthPilotArmed, let savedRR = recorder.lastSavedFile {
+                healthPilotArmed = false
+                await healthPilot.exportFiveMinuteWindow(fileURL: savedRR)
+            }
             syncReminders()
             let night = recorder.phoneNightId ?? "setup"
             if let error = recorder.lastError {
@@ -404,6 +414,18 @@ struct ContentView: View {
                         Button("Disconnect AthleteOS", role: .destructive) { uploader.disconnect() }.disabled(uploader.busy)
                     }
                     Text(uploader.statusText).font(.footnote).foregroundStyle(.secondary)
+                }
+                Section("Apple Health · Athlytic experiment") {
+                    Toggle("Export a 5-minute H10 test after my next End night", isOn: $healthPilotArmed)
+                    Text("One-shot and opt-in. After you End night, Recorder will try to write one continuous 5-minute heartbeat series and its correctly calculated SDNN before the normal AthleteOS cleanup. It never writes RMSSD into the SDNN field.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    Text("An Apple Health authorization sheet is required. SideStore must sign the HealthKit entitlement. H10 packet receipt times are estimates, not hardware-synchronised timestamps.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    Text(healthPilot.statusText)
+                        .font(.footnote).foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                    Text("If HealthKit saves both values, compare Athlytic with Use RMSSD for HRV on and off. Athlytic support for third-party heartbeat series is not yet confirmed.")
+                        .font(.footnote).foregroundStyle(.secondary)
                 }
                 Section("Notifications") {
                     if notifications.enabled {
