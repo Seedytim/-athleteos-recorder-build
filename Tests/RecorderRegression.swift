@@ -8,6 +8,7 @@ struct RecorderRegression {
         try testMorningSaveSourceInvariants()
         try testBuild29ReleaseInvariants()
         testStreamHealthPolicy()
+        testHealthKitRRWindow()
         let id = UUID().uuidString
         let sha = String(repeating: "a", count: 64)
         func receipt(archived: Bool = true, verified: Bool = true, hash: String? = nil, processing: String = "complete") -> Data {
@@ -185,6 +186,56 @@ struct RecorderRegression {
         ), "Intentional cancellation must not trigger recovery")
         print("PASS: PMD startup grace, silent-stall detection, normal completion recovery, and packet-confirmed restart")
     }
+
+    static func testHealthKitRRWindow() {
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let segment = UUID()
+        let metadata = ResearchDeviceMetadata(
+            deviceId: "TEST", model: "Polar H10", firmwareVersion: nil,
+            polarSdkVersion: "test", appVersion: "test", appBuild: "test",
+            internalRRExerciseId: "LIVE_test", batteryPercentAtStart: nil
+        )
+        func packet(_ receiptSeconds: Int, segmentID: UUID = segment,
+                    rr: [Int] = [900, 1100], contact: Bool = true) -> ResearchHRSample {
+            let at = start.addingTimeInterval(Double(receiptSeconds))
+            return ResearchHRSample(
+                receivedAt: at, bpm: 60, rrMs: rr,
+                rrAvailable: true, contactStatus: contact, contactStatusSupported: true,
+                receivedAtUnixMs: at.timeIntervalSince1970 * 1_000,
+                streamSegmentId: segmentID
+            )
+        }
+        func recording(_ packets: [ResearchHRSample]) -> RawH10RRRecording {
+            RawH10RRRecording(
+                phoneId: UUID(), deviceId: "TEST", exerciseId: "LIVE_test",
+                startedAt: start, stoppedAt: start.addingTimeInterval(900),
+                packets: packets, metadata: metadata
+            )
+        }
+
+        let clean = (1...160).map { packet($0 * 2) }
+        guard let window = HealthKitRRWindow.latestFiveMinutes(in: recording(clean)) else {
+            preconditionFailure("Continuous 320-second live RR must yield a pilot window")
+        }
+        precondition(window.durationSeconds >= 300 && window.durationSeconds <= 302)
+        precondition(window.intervalsMs.count >= 300)
+        precondition(abs(window.sdnnMs - 100) < 2, "SDNN is not RMSSD")
+        precondition(abs(window.rmssdMs - 200) < 2, "RMSSD should use successive RR differences")
+
+        let contactBreak = (1...70).map { packet($0 * 2) }
+            + [packet(142, rr: [900, 1100], contact: false)]
+            + (72...140).map { packet($0 * 2) }
+        precondition(HealthKitRRWindow.latestFiveMinutes(in: recording(contactBreak)) == nil,
+                     "Do not stitch RR across contact loss")
+
+        let interrupted = (1...90).map { packet($0 * 2) }
+            + (91...180).map { packet($0 * 2 + 20, segmentID: UUID()) }
+        precondition(HealthKitRRWindow.latestFiveMinutes(in: recording(interrupted)) == nil,
+                     "Different BLE segments must never form a synthetic five-minute window")
+        precondition(HealthKitRRWindow.latestFiveMinutes(in: recording([packet(1, rr: [0, 0])])) == nil)
+        print("PASS: H10 HealthKit pilot uses genuine continuous RR, true SDNN/RMSSD, and rejects gaps/contact loss")
+    }
+
     static func testConnectionTransitions() {
         func step(on: Bool = true, connected: Bool = false, record: Bool = false,
                   transfer: Bool = false, busy: Bool = false, timedOut: Bool = false,
