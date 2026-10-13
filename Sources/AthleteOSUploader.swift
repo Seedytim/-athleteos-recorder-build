@@ -153,7 +153,7 @@ final class AthleteOSUploader: ObservableObject {
             }
 
             if http.statusCode == 401 {
-                isConnected = false
+                invalidateRejectedConnection()
                 throw UploadError.rejected(status: 401, detail: "Connection key rejected. Reconnect from AthleteOS.")
             }
             guard (200..<300).contains(http.statusCode), responseIsOk(responseData) else {
@@ -508,6 +508,13 @@ final class AthleteOSUploader: ObservableObject {
         let status = SecItemCopyMatching(query as CFDictionary, &item)
         guard status == errSecSuccess, let data = item as? Data else { return nil }
         return String(data: data, encoding: .utf8)
+    }
+
+    private func invalidateRejectedConnection() {
+        // A rejected token must not survive an app restart and make Recorder
+        // appear connected again. Test token providers are intentionally external.
+        if tokenProvider == nil { deleteToken() }
+        isConnected = false
     }
 
     private func deleteToken() {
