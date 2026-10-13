@@ -555,7 +555,7 @@ struct RecorderRegression {
 import CryptoKit
 
 private final class ArchiveTransport: URLProtocol {
-    enum Mode { case offline, loseResponse, duplicate, processingError, wrongHash }
+    enum Mode { case offline, unauthorized, loseResponse, duplicate, processingError, wrongHash }
     static var mode: Mode = .offline
     static var sha = ""
     static let recordingID = UUID().uuidString
@@ -566,6 +566,13 @@ private final class ArchiveTransport: URLProtocol {
     override func startLoading() {
         if Self.mode == .offline {
             client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet)); return
+        }
+        if Self.mode == .unauthorized {
+            let data = Data("{\"ok\":false,\"error\":\"unauthorized\"}".utf8)
+            client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: 401, httpVersion: nil, headerFields: nil)!, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+            return
         }
         if !Self.serverHasArchive { Self.serverHasArchive = true; Self.archiveWrites += 1 }
         if Self.mode == .loseResponse {
@@ -593,6 +600,9 @@ extension RecorderRegression {
         let session = URLSession(configuration: config)
         defer { session.invalidateAndCancel() }
         let uploader = AthleteOSUploader(session: session, tokenProvider: { String(repeating: "x", count: 32) })
+        ArchiveTransport.mode = .unauthorized
+        let unauthorized = await uploader.upload(fileURL: file)
+        precondition(unauthorized == nil && !uploader.isConnected, "A rejected connection key must immediately mark Recorder disconnected")
         ArchiveTransport.mode = .offline
         let offline = await uploader.upload(fileURL: file)
         precondition(offline == nil && !ArchiveTransport.serverHasArchive)
