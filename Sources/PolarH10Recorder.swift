@@ -1747,7 +1747,7 @@ final class PolarH10Recorder: NSObject, ObservableObject {
 
         researchReconnectTask = Task { [weak self] in
             guard let self else { return }
-            let delays: [UInt64] = [2, 5, 10, 20, 30, 60]
+            let delays: [UInt64] = [0, 2, 5, 10, 20, 30, 60]
             var attempt = 0
             while self.rawCaptureExpected && self.recordingOngoing {
                 let delay = delays[min(attempt, delays.count - 1)]
